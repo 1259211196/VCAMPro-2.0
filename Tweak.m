@@ -10,6 +10,7 @@
 #import <CoreTelephony/CTCarrier.h>
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <objc/runtime.h>
+#import <objc/message.h>   // 🌟 仅仅新增了这一行！解决编译报错
 #import <dlfcn.h>
 
 #pragma clang diagnostic push
