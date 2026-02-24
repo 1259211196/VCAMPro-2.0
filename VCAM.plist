@@ -1,0 +1,10 @@
+{
+    Filter = {
+        Bundles = (
+            "com.ss.iphone.ugc.Aweme",
+            "com.zhiliaoapp.musically",
+            "com.tencent.xin",
+            "com.apple.camera"
+        );
+    };
+}
