@@ -383,7 +383,6 @@
     VCAMManager *mgr = [VCAMManager sharedManager];
     _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n基站: %@ (%@-%@)", mgr.fakeCoordinate.latitude, mgr.fakeCoordinate.longitude, mgr.fakeCarrierName, mgr.fakeMCC, mgr.fakeMNC];
 }
-// 🌟 补丁同步：逆向地图获取国家后，同步配置时区与语言
 - (void)addPinToMap:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateBegan) return;
     CGPoint touchPoint = [gesture locationInView:_mapView];
@@ -433,7 +432,7 @@
 }
 @end
 
-// 🌟 补丁同步：拦截 App 强行获取真实定位
+// 🌟 拦截 App 强行获取真实定位
 @implementation CLLocationManager (VCAMProLocationHook)
 - (CLLocation *)vcam_location {
     if ([VCAMManager sharedManager].isEnvSpoofingEnabled) { return [[CLLocation alloc] initWithCoordinate:[VCAMManager sharedManager].fakeCoordinate altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]]; }
@@ -441,7 +440,7 @@
 }
 @end
 
-// 🌟 补丁同步：全局时区欺骗
+// 🌟 全局时区欺骗
 @implementation NSTimeZone (VCAMProHook)
 + (NSTimeZone *)vcam_systemTimeZone {
     if ([VCAMManager sharedManager].isEnvSpoofingEnabled) {
@@ -459,7 +458,7 @@
 }
 @end
 
-// 🌟 补丁同步：全局系统语言与地区欺骗
+// 🌟 全局系统语言与地区欺骗
 @implementation NSLocale (VCAMProHook)
 + (NSLocale *)vcam_currentLocale {
     if ([VCAMManager sharedManager].isEnvSpoofingEnabled) {
@@ -477,11 +476,11 @@
 - (void)vcam_becomeKeyWindow {
     [self vcam_becomeKeyWindow];
     if (![self isKindOfClass:NSClassFromString(@"VCAMHUDWindow")] && ![self isKindOfClass:NSClassFromString(@"VCAMMapWindow")] && !objc_getAssociatedObject(self, "_vcam_g")) {
-        // 🌟 补丁同步：双指双击 -> 视频控制台
+        // 🌟 修正1：双指双击 -> 视频控制台
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[VCAMManager sharedManager] action:@selector(handleTwoFingerLongPress:)];
         tap.numberOfTouchesRequired = 2; tap.numberOfTapsRequired = 2; tap.cancelsTouchesInView = NO; [self addGestureRecognizer:tap];
         
-        // 🌟 补丁同步：三指长按 -> 全球定位基站面板
+        // 🌟 修正2：三指长按 -> 全球定位基站面板
         UILongPressGestureRecognizer *mapLp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showMapPanel)];
         mapLp.numberOfTouchesRequired = 3; mapLp.minimumPressDuration = 0.5; mapLp.cancelsTouchesInView = NO; [self addGestureRecognizer:mapLp];
         
@@ -491,27 +490,43 @@
 - (void)showMapPanel { [VCAMMapWindow sharedMap].hidden = NO; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred]; }
 @end
 
+// 🌟 修正3：解决底层逻辑 Bug，确保真正能够拦截原视频流！
 @implementation AVCaptureVideoDataOutput (VCAMHook)
 - (void)vcam_setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && !object_getClass(delegate) == NSClassFromString(@"VCAMUnifiedProxy")) { VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_vcam_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self vcam_setSampleBufferDelegate:proxy queue:queue];
+    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMUnifiedProxy")]) { 
+        VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; 
+        objc_setAssociatedObject(self, "_vcam_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); 
+        [self vcam_setSampleBufferDelegate:proxy queue:queue];
     } else { [self vcam_setSampleBufferDelegate:delegate queue:queue]; }
 }
 @end
+
 @implementation AVCaptureDataOutputSynchronizer (VCAMHook)
 - (void)vcam_setDelegate:(id)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && !object_getClass(delegate) == NSClassFromString(@"VCAMUnifiedProxy")) { VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_vcam_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self vcam_setDelegate:proxy queue:queue];
+    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMUnifiedProxy")]) { 
+        VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; 
+        objc_setAssociatedObject(self, "_vcam_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); 
+        [self vcam_setDelegate:proxy queue:queue];
     } else { [self vcam_setDelegate:delegate queue:queue]; }
 }
 @end
+
 @implementation AVCaptureMetadataOutput (VCAMHook)
 - (void)vcam_setMetadataObjectsDelegate:(id)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && !object_getClass(delegate) == NSClassFromString(@"VCAMUnifiedProxy")) { VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_vcam_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self vcam_setMetadataObjectsDelegate:proxy queue:queue];
+    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMUnifiedProxy")]) { 
+        VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; 
+        objc_setAssociatedObject(self, "_vcam_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); 
+        [self vcam_setMetadataObjectsDelegate:proxy queue:queue];
     } else { [self vcam_setMetadataObjectsDelegate:delegate queue:queue]; }
 }
 @end
+
 @implementation CLLocationManager (VCAMHook)
 - (void)vcam_setDelegate:(id<CLLocationManagerDelegate>)delegate {
-    if (delegate && !object_getClass(delegate) == NSClassFromString(@"VCAMUnifiedProxy")) { VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_vcam_loc_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self vcam_setDelegate:proxy];
+    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMUnifiedProxy")]) { 
+        VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; 
+        objc_setAssociatedObject(self, "_vcam_loc_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); 
+        [self vcam_setDelegate:(id<CLLocationManagerDelegate>)proxy];
     } else { [self vcam_setDelegate:delegate]; }
 }
 @end
