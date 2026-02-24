@@ -4,9 +4,10 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v3
+      # 🌟 将这里的 checkout 升级到了 v4
+      - uses: actions/checkout@v4
       - name: Setup Theos
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: theos/theos
           path: theos
@@ -19,7 +20,8 @@ jobs:
           export THEOS=${{ github.workspace }}/theos
           make package FINALPACKAGE=1
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        # 🌟 将这里的 upload-artifact 升级到了 v4，解决报错！
+        uses: actions/upload-artifact@v4
         with:
           name: VCAM-Package
           path: packages/*.deb
