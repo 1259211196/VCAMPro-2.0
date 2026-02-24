@@ -179,8 +179,11 @@
     BOOL shouldHide = (!self.isHUDVisible || !self.isEnabled);
     dispatch_async(dispatch_get_main_queue(), ^{ @synchronized (self.displayLayers) { for (AVSampleBufferDisplayLayer *layer in self.displayLayers.allObjects) { layer.hidden = shouldHide; if (shouldHide) [layer flush]; } } });
 }
-- (void)handleTwoFingerLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateBegan) { self.isHUDVisible = YES; [VCAMHUDWindow sharedHUD].hidden = NO; [self updateDisplayLayers]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred]; }
+- (void)handleTwoFingerLongPress:(UIGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateRecognized || gesture.state == UIGestureRecognizerStateBegan) { 
+        self.isHUDVisible = YES; [VCAMHUDWindow sharedHUD].hidden = NO; [self updateDisplayLayers]; 
+        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred]; 
+    }
 }
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer { return YES; }
 - (void)saveEnvironmentSettings {
@@ -380,6 +383,7 @@
     VCAMManager *mgr = [VCAMManager sharedManager];
     _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n基站: %@ (%@-%@)", mgr.fakeCoordinate.latitude, mgr.fakeCoordinate.longitude, mgr.fakeCarrierName, mgr.fakeMCC, mgr.fakeMNC];
 }
+// 🌟 补丁同步：逆向地图获取国家后，同步配置时区与语言
 - (void)addPinToMap:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateBegan) return;
     CGPoint touchPoint = [gesture locationInView:_mapView];
@@ -388,17 +392,22 @@
     [VCAMManager sharedManager].fakeCoordinate = coord;
     
     CLLocation *location = [[CLLocation alloc] initWithLatitude:coord.latitude longitude:coord.longitude];
-    CLGeocoder *geocoder = [[CLGeocoder alloc] init]; _infoLabel.text = @"⏳ 正在解析该国家基站信息...";
+    CLGeocoder *geocoder = [[CLGeocoder alloc] init]; _infoLabel.text = @"⏳ 正在解析该国家基站与时区信息...";
     
     [geocoder reverseGeocodeLocation:location completionHandler:^(NSArray<CLPlacemark *> * _Nullable placemarks, NSError * _Nullable error) {
         if (placemarks.count > 0) {
             NSString *countryCode = placemarks.firstObject.ISOcountryCode.lowercaseString;
             NSString *mcc = @"262"; NSString *mnc = @"01"; NSString *carrier = @"Telekom.de"; // 默认德国
-            if ([countryCode isEqualToString:@"us"]) { mcc = @"310"; mnc = @"410"; carrier = @"AT&T"; }
-            else if ([countryCode isEqualToString:@"gb"]) { mcc = @"234"; mnc = @"15"; carrier = @"Vodafone UK"; }
-            else if ([countryCode isEqualToString:@"fr"]) { mcc = @"208"; mnc = @"01"; carrier = @"Orange F"; }
-            else if ([countryCode isEqualToString:@"it"]) { mcc = @"222"; mnc = @"01"; carrier = @"TIM"; }
+            NSString *timezone = @"Europe/Berlin"; NSString *locale = @"de_DE";
+            
+            if ([countryCode isEqualToString:@"us"]) { mcc = @"310"; mnc = @"410"; carrier = @"AT&T"; timezone = @"America/New_York"; locale = @"en_US"; }
+            else if ([countryCode isEqualToString:@"gb"]) { mcc = @"234"; mnc = @"15"; carrier = @"Vodafone UK"; timezone = @"Europe/London"; locale = @"en_GB"; }
+            else if ([countryCode isEqualToString:@"fr"]) { mcc = @"208"; mnc = @"01"; carrier = @"Orange F"; timezone = @"Europe/Paris"; locale = @"fr_FR"; }
+            else if ([countryCode isEqualToString:@"it"]) { mcc = @"222"; mnc = @"01"; carrier = @"TIM"; timezone = @"Europe/Rome"; locale = @"it_IT"; }
+            
             [VCAMManager sharedManager].fakeMCC = mcc; [VCAMManager sharedManager].fakeMNC = mnc; [VCAMManager sharedManager].fakeISO = countryCode; [VCAMManager sharedManager].fakeCarrierName = carrier;
+            [[NSUserDefaults standardUserDefaults] setObject:timezone forKey:@"vcam_env_tz"];
+            [[NSUserDefaults standardUserDefaults] setObject:locale forKey:@"vcam_env_locale"];
         }
         [[VCAMManager sharedManager] saveEnvironmentSettings]; [self updateInfoLabel];
         UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred];
@@ -408,7 +417,7 @@
 @end
 
 // ============================================================================
-// 【7. 环境伪装 Hook (CoreTelephony)】
+// 【7. 全栈环境伪装 Hook (基站/GPS直读/语言/时区)】
 // ============================================================================
 @implementation CTCarrier (VCAMProHook)
 - (NSString *)vcam_carrierName { return [VCAMManager sharedManager].isEnvSpoofingEnabled ? [VCAMManager sharedManager].fakeCarrierName : [self vcam_carrierName]; }
@@ -424,6 +433,43 @@
 }
 @end
 
+// 🌟 补丁同步：拦截 App 强行获取真实定位
+@implementation CLLocationManager (VCAMProLocationHook)
+- (CLLocation *)vcam_location {
+    if ([VCAMManager sharedManager].isEnvSpoofingEnabled) { return [[CLLocation alloc] initWithCoordinate:[VCAMManager sharedManager].fakeCoordinate altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]]; }
+    return [self vcam_location];
+}
+@end
+
+// 🌟 补丁同步：全局时区欺骗
+@implementation NSTimeZone (VCAMProHook)
++ (NSTimeZone *)vcam_systemTimeZone {
+    if ([VCAMManager sharedManager].isEnvSpoofingEnabled) {
+        NSString *tzName = [[NSUserDefaults standardUserDefaults] stringForKey:@"vcam_env_tz"] ?: @"Europe/Berlin";
+        NSTimeZone *tz = [NSTimeZone timeZoneWithName:tzName]; if (tz) return tz;
+    }
+    return [self vcam_systemTimeZone];
+}
++ (NSTimeZone *)vcam_defaultTimeZone {
+    if ([VCAMManager sharedManager].isEnvSpoofingEnabled) {
+        NSString *tzName = [[NSUserDefaults standardUserDefaults] stringForKey:@"vcam_env_tz"] ?: @"Europe/Berlin";
+        NSTimeZone *tz = [NSTimeZone timeZoneWithName:tzName]; if (tz) return tz;
+    }
+    return [self vcam_defaultTimeZone];
+}
+@end
+
+// 🌟 补丁同步：全局系统语言与地区欺骗
+@implementation NSLocale (VCAMProHook)
++ (NSLocale *)vcam_currentLocale {
+    if ([VCAMManager sharedManager].isEnvSpoofingEnabled) {
+        NSString *locId = [[NSUserDefaults standardUserDefaults] stringForKey:@"vcam_env_locale"] ?: @"de_DE";
+        return [NSLocale localeWithLocaleIdentifier:locId];
+    }
+    return [self vcam_currentLocale];
+}
+@end
+
 // ============================================================================
 // 【8. 极致安全底层注册引擎 (+load)】
 // ============================================================================
@@ -431,12 +477,14 @@
 - (void)vcam_becomeKeyWindow {
     [self vcam_becomeKeyWindow];
     if (![self isKindOfClass:NSClassFromString(@"VCAMHUDWindow")] && ![self isKindOfClass:NSClassFromString(@"VCAMMapWindow")] && !objc_getAssociatedObject(self, "_vcam_g")) {
-        // 三指长按 -> 视频控制台
-        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:[VCAMManager sharedManager] action:@selector(handleTwoFingerLongPress:)];
-        lp.numberOfTouchesRequired = 3; lp.minimumPressDuration = 0.5; lp.cancelsTouchesInView = NO; lp.delegate = [VCAMManager sharedManager]; [self addGestureRecognizer:lp];
-        // 四指长按 -> 全球地图基站伪装
+        // 🌟 补丁同步：双指双击 -> 视频控制台
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[VCAMManager sharedManager] action:@selector(handleTwoFingerLongPress:)];
+        tap.numberOfTouchesRequired = 2; tap.numberOfTapsRequired = 2; tap.cancelsTouchesInView = NO; [self addGestureRecognizer:tap];
+        
+        // 🌟 补丁同步：三指长按 -> 全球定位基站面板
         UILongPressGestureRecognizer *mapLp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showMapPanel)];
-        mapLp.numberOfTouchesRequired = 4; mapLp.minimumPressDuration = 0.5; mapLp.cancelsTouchesInView = NO; [self addGestureRecognizer:mapLp];
+        mapLp.numberOfTouchesRequired = 3; mapLp.minimumPressDuration = 0.5; mapLp.cancelsTouchesInView = NO; [self addGestureRecognizer:mapLp];
+        
         objc_setAssociatedObject(self, "_vcam_g", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
@@ -477,11 +525,20 @@
     dlopen("/System/Library/Frameworks/CoreTelephony.framework/CoreTelephony", RTLD_NOW);
     
     method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(becomeKeyWindow)), class_getInstanceMethod([UIWindow class], @selector(vcam_becomeKeyWindow)));
+    
+    // 视觉劫持注册
     Class vdoClass = NSClassFromString(@"AVCaptureVideoDataOutput"); if (vdoClass) method_exchangeImplementations(class_getInstanceMethod(vdoClass, @selector(setSampleBufferDelegate:queue:)), class_getInstanceMethod(vdoClass, @selector(vcam_setSampleBufferDelegate:queue:)));
     Class syncClass = NSClassFromString(@"AVCaptureDataOutputSynchronizer"); if (syncClass) method_exchangeImplementations(class_getInstanceMethod(syncClass, @selector(setDelegate:queue:)), class_getInstanceMethod(syncClass, @selector(vcam_setDelegate:queue:)));
     Class metaClass = NSClassFromString(@"AVCaptureMetadataOutput"); if (metaClass) method_exchangeImplementations(class_getInstanceMethod(metaClass, @selector(setMetadataObjectsDelegate:queue:)), class_getInstanceMethod(metaClass, @selector(vcam_setMetadataObjectsDelegate:queue:)));
-    Class locClass = NSClassFromString(@"CLLocationManager"); if (locClass) method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(setDelegate:)), class_getInstanceMethod(locClass, @selector(vcam_setDelegate:)));
     
+    // 定位劫持注册
+    Class locClass = NSClassFromString(@"CLLocationManager"); 
+    if (locClass) {
+        method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(setDelegate:)), class_getInstanceMethod(locClass, @selector(vcam_setDelegate:)));
+        method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(location)), class_getInstanceMethod(locClass, @selector(vcam_location)));
+    }
+    
+    // 基站劫持注册
     Class carrierClass = NSClassFromString(@"CTCarrier");
     if (carrierClass) {
         method_exchangeImplementations(class_getInstanceMethod(carrierClass, @selector(carrierName)), class_getInstanceMethod(carrierClass, @selector(vcam_carrierName)));
@@ -491,6 +548,17 @@
     }
     Class netInfoClass = NSClassFromString(@"CTTelephonyNetworkInfo");
     if (netInfoClass) method_exchangeImplementations(class_getInstanceMethod(netInfoClass, @selector(serviceSubscriberCellularProviders)), class_getInstanceMethod(netInfoClass, @selector(vcam_serviceSubscriberCellularProviders)));
+    
+    // 时区与语言劫持注册
+    Class tzClass = NSClassFromString(@"NSTimeZone");
+    if (tzClass) {
+        method_exchangeImplementations(class_getClassMethod(tzClass, @selector(systemTimeZone)), class_getClassMethod(tzClass, @selector(vcam_systemTimeZone)));
+        method_exchangeImplementations(class_getClassMethod(tzClass, @selector(defaultTimeZone)), class_getClassMethod(tzClass, @selector(vcam_defaultTimeZone)));
+    }
+    Class loclClass = NSClassFromString(@"NSLocale");
+    if (loclClass) {
+        method_exchangeImplementations(class_getClassMethod(loclClass, @selector(currentLocale)), class_getClassMethod(loclClass, @selector(vcam_currentLocale)));
+    }
 }
 @end
 #pragma clang diagnostic pop
