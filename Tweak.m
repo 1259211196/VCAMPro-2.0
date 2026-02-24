@@ -222,4 +222,275 @@
 }
 - (Class)class { return [self.target class]; }
 - (Class)superclass { return [self.target superclass]; }
-- (BOOL)isKindOfClass:(Class)aClass {
+- (BOOL)isKindOfClass:(Class)aClass { return [self.target isKindOfClass:aClass]; }
+- (BOOL)conformsToProtocol:(Protocol *)aProtocol { return [self.target conformsToProtocol:aProtocol]; }
+
+- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+    @autoreleasepool { [[VCAMManager sharedManager].processor processSampleBuffer:sampleBuffer]; if ([self.target respondsToSelector:_cmd]) [self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection]; }
+}
+- (void)dataOutputSynchronizer:(AVCaptureDataOutputSynchronizer *)synchronizer didOutputSynchronizedDataCollection:(AVCaptureSynchronizedDataCollection *)synchronizedDataCollection {
+    @autoreleasepool {
+        for (AVCaptureOutput *out in synchronizer.dataOutputs) {
+            if ([out isKindOfClass:NSClassFromString(@"AVCaptureVideoDataOutput")]) { AVCaptureSynchronizedData *syncData = [synchronizedDataCollection synchronizedDataForCaptureOutput:out]; if ([syncData respondsToSelector:@selector(sampleBuffer)]) { CMSampleBufferRef sbuf = ((CMSampleBufferRef (*)(id, SEL))objc_msgSend)(syncData, @selector(sampleBuffer)); if (sbuf) [[VCAMManager sharedManager].processor processSampleBuffer:sbuf]; } } 
+            else if ([out isKindOfClass:NSClassFromString(@"AVCaptureDepthDataOutput")] && [VCAMManager sharedManager].isEnabled) { AVCaptureSynchronizedData *syncData = [synchronizedDataCollection synchronizedDataForCaptureOutput:out]; if ([syncData respondsToSelector:@selector(depthData)]) { AVDepthData *depthData = ((AVDepthData *(*)(id, SEL))objc_msgSend)(syncData, @selector(depthData)); [[VCAMManager sharedManager].processor processDepthBuffer:depthData]; } }
+        }
+        if ([self.target respondsToSelector:_cmd]) [self.target dataOutputSynchronizer:synchronizer didOutputSynchronizedDataCollection:synchronizedDataCollection];
+    }
+}
+- (void)captureOutput:(AVCaptureOutput *)output didOutputMetadataObjects:(NSArray *)metadataObjects fromConnection:(AVCaptureConnection *)connection {
+    @autoreleasepool { NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:metadataObjects.count]; BOOL shouldFilter = ([VCAMManager sharedManager].isEnabled && [VCAMManager sharedManager].isHUDVisible); for (AVMetadataObject *obj in metadataObjects) { if (shouldFilter && [obj.type isEqualToString:AVMetadataObjectTypeFace]) continue; [filtered addObject:obj]; } if ([self.target respondsToSelector:_cmd]) [self.target captureOutput:output didOutputMetadataObjects:filtered fromConnection:connection]; }
+}
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
+    if ([VCAMManager sharedManager].isEnvSpoofingEnabled && locations.count > 0) {
+        CLLocation *fakeLoc = [[CLLocation alloc] initWithCoordinate:[VCAMManager sharedManager].fakeCoordinate altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
+        if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:@[fakeLoc]];
+    } else {
+        if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:locations];
+    }
+}
+@end
+
+// ============================================================================
+// 【5. HUD 控制面板 (色彩过滤与去重)】
+// ============================================================================
+@implementation VCAMHUDWindow { 
+    UILabel *_statusLabel; UISwitch *_powerSwitch; NSInteger _pendingSlot; AVSampleBufferDisplayLayer *_previewLayer; 
+    UISwitch *_colorSwitch; UISlider *_brightSlider; UISlider *_contrastSlider; UISlider *_saturationSlider;
+}
++ (instancetype)sharedHUD {
+    static VCAMHUDWindow *hud = nil; static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (@available(iOS 13.0, *)) { for (UIWindowScene *scene in (NSArray<UIWindowScene *>*)[UIApplication sharedApplication].connectedScenes) { if (scene.activationState == UISceneActivationStateForegroundActive) { hud = [[VCAMHUDWindow alloc] initWithWindowScene:scene]; hud.frame = CGRectMake(20, 80, 290, 440); break; } } }
+        if (!hud) hud = [[VCAMHUDWindow alloc] initWithFrame:CGRectMake(20, 80, 290, 440)];
+    }); return hud;
+}
+- (instancetype)initWithFrame:(CGRect)frame { if (self = [super initWithFrame:frame]) { [self commonInit]; } return self; }
+- (instancetype)initWithWindowScene:(UIWindowScene *)windowScene { if (self = [super initWithWindowScene:windowScene]) { [self commonInit]; } return self; }
+- (void)commonInit {
+    self.windowLevel = UIWindowLevelStatusBar + 100; self.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85]; self.layer.cornerRadius = 16; self.layer.masksToBounds = YES; self.hidden = YES; 
+    [self setupUI]; UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]; [self addGestureRecognizer:pan];
+}
+- (void)setupUI {
+    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 180, 20)]; _statusLabel.textColor = [UIColor greenColor]; _statusLabel.font = [UIFont boldSystemFontOfSize:14]; _statusLabel.text = @"🟢 VCAM [CH 1]"; [self addSubview:_statusLabel];
+    _powerSwitch = [[UISwitch alloc] init]; _powerSwitch.transform = CGAffineTransformMakeScale(0.8, 0.8); _powerSwitch.frame = CGRectMake(230, 7, 50, 31); _powerSwitch.on = YES; [_powerSwitch addTarget:self action:@selector(togglePower:) forControlEvents:UIControlEventValueChanged]; [self addSubview:_powerSwitch];
+    CGFloat btnWidth = 40, btnHeight = 38, gap = 8;
+    for (int i = 0; i < 4; i++) {
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem]; btn.frame = CGRectMake(12 + i * (btnWidth + gap), 42, btnWidth, btnHeight); btn.backgroundColor = [UIColor colorWithWhite:0.3 alpha:1.0]; btn.layer.cornerRadius = 8; [btn setTitle:[NSString stringWithFormat:@"%d", i+1] forState:UIControlStateNormal]; [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; btn.titleLabel.font = [UIFont boldSystemFontOfSize:16]; btn.tag = i + 1;
+        [btn addTarget:self action:@selector(channelSwitched:) forControlEvents:UIControlEventTouchUpInside]; UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)]; [btn addGestureRecognizer:lp]; [self addSubview:btn];
+    }
+    UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem]; clearBtn.frame = CGRectMake(12 + 4 * (btnWidth + gap), 42, 60, btnHeight); clearBtn.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:1.0]; clearBtn.layer.cornerRadius = 8; [clearBtn setTitle:@"隐藏" forState:UIControlStateNormal]; [clearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14]; [clearBtn addTarget:self action:@selector(hideHUD) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:clearBtn];
+    
+    _previewLayer = [[AVSampleBufferDisplayLayer alloc] init]; _previewLayer.frame = CGRectMake(12, 90, 266, 150); _previewLayer.videoGravity = AVLayerVideoGravityResizeAspectFill; _previewLayer.backgroundColor = [UIColor blackColor].CGColor; _previewLayer.cornerRadius = 8; _previewLayer.masksToBounds = YES; [self.layer addSublayer:_previewLayer]; [[VCAMManager sharedManager].displayLayers addObject:_previewLayer];
+    
+    UILabel *colorLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 250, 150, 20)]; colorLabel.text = @"🎨 导入重编码与去重"; colorLabel.textColor = [UIColor whiteColor]; colorLabel.font = [UIFont boldSystemFontOfSize:14]; [self addSubview:colorLabel];
+    _colorSwitch = [[UISwitch alloc] init]; _colorSwitch.transform = CGAffineTransformMakeScale(0.7, 0.7); _colorSwitch.frame = CGRectMake(235, 245, 50, 31); _colorSwitch.on = NO; [self addSubview:_colorSwitch];
+    
+    UILabel *bLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 280, 40, 20)]; bLabel.text = @"亮度"; bLabel.textColor = [UIColor lightGrayColor]; bLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:bLabel];
+    _brightSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 280, 220, 20)]; _brightSlider.minimumValue = -0.2; _brightSlider.maximumValue = 0.2; _brightSlider.value = 0.0; [self addSubview:_brightSlider];
+    
+    UILabel *cLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 320, 40, 20)]; cLabel.text = @"对比"; cLabel.textColor = [UIColor lightGrayColor]; cLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:cLabel];
+    _contrastSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 320, 220, 20)]; _contrastSlider.minimumValue = 0.5; _contrastSlider.maximumValue = 1.5; _contrastSlider.value = 1.0; [self addSubview:_contrastSlider];
+    
+    UILabel *sLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 360, 40, 20)]; sLabel.text = @"饱和"; sLabel.textColor = [UIColor lightGrayColor]; sLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:sLabel];
+    _saturationSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 360, 220, 20)]; _saturationSlider.minimumValue = 0.0; _saturationSlider.maximumValue = 2.0; _saturationSlider.value = 1.0; [self addSubview:_saturationSlider];
+    
+    UILabel *tipLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 400, 266, 30)]; tipLabel.text = @"开启去重后导入耗时较长，请耐心等待\n关闭开关则极速复制原视频"; tipLabel.numberOfLines = 2; tipLabel.textColor = [UIColor darkGrayColor]; tipLabel.font = [UIFont systemFontOfSize:10]; tipLabel.textAlignment = NSTextAlignmentCenter; [self addSubview:tipLabel];
+}
+- (void)hideHUD { self.hidden = YES; [VCAMManager sharedManager].isHUDVisible = NO; [[VCAMManager sharedManager] updateDisplayLayers]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
+- (void)togglePower:(UISwitch *)sender { [VCAMManager sharedManager].isEnabled = sender.isOn; [[VCAMManager sharedManager] updateDisplayLayers]; if (sender.isOn) { _statusLabel.text = [NSString stringWithFormat:@"🟢 VCAM [CH %ld]", (long)[VCAMManager sharedManager].currentSlot]; _statusLabel.textColor = [UIColor greenColor]; } else { _statusLabel.text = @"🔴 VCAM 已禁用"; _statusLabel.textColor = [UIColor redColor]; } UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
+- (void)handlePan:(UIPanGestureRecognizer *)pan { CGPoint trans = [pan translationInView:self]; self.center = CGPointMake(self.center.x + trans.x, self.center.y + trans.y); [pan setTranslation:CGPointZero inView:self]; }
+- (void)channelSwitched:(UIButton *)sender { [VCAMManager sharedManager].currentSlot = sender.tag; if (_powerSwitch.isOn) { _statusLabel.text = [NSString stringWithFormat:@"🟢 VCAM [CH %ld]", (long)sender.tag]; } [[NSNotificationCenter defaultCenter] postNotificationName:@"VCAMChannelDidChangeNotification" object:nil]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred]; }
+- (void)clearAllVideos { NSString *docPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject]; for (int i = 1; i <= 4; i++) { NSString *path = [docPath stringByAppendingPathComponent:[NSString stringWithFormat:@"test%d.mp4", i]]; [[NSFileManager defaultManager] removeItemAtPath:path error:nil]; } [VCAMManager sharedManager].currentSlot = 1; [[NSNotificationCenter defaultCenter] postNotificationName:@"VCAMChannelDidChangeNotification" object:nil]; _statusLabel.text = @"🗑️ 已清空"; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred]; }
+- (void)handleLongPress:(UILongPressGestureRecognizer *)lp { 
+    if (lp.state == UIGestureRecognizerStateBegan) { 
+        _pendingSlot = lp.view.tag; UIImagePickerController *picker = [[UIImagePickerController alloc] init]; picker.delegate = self; picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary; picker.mediaTypes = @[@"public.movie"]; picker.videoExportPreset = AVAssetExportPresetPassthrough; 
+        UIWindow *foundWindow = nil; 
+        if (@available(iOS 13.0, *)) { for (UIWindowScene *scene in (NSArray<UIWindowScene *>*)[UIApplication sharedApplication].connectedScenes) { if (scene.activationState == UISceneActivationStateForegroundActive) { for (UIWindow *window in scene.windows) { if (window.isKeyWindow || window.windowLevel == UIWindowLevelNormal) { foundWindow = window; break; } } } if (foundWindow) break; } } 
+        UIViewController *root = foundWindow.rootViewController; while (root.presentedViewController) root = root.presentedViewController; 
+        if (root) [root presentViewController:picker animated:YES completion:nil]; 
+    } 
+}
+- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info { 
+    NSURL *url = info[UIImagePickerControllerMediaURL]; 
+    if (url) { 
+        NSString *dest = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject] stringByAppendingPathComponent:[NSString stringWithFormat:@"test%ld.mp4", (long)self->_pendingSlot]]; 
+        [[NSFileManager defaultManager] removeItemAtPath:dest error:nil]; 
+        if (_colorSwitch.isOn) {
+            self->_statusLabel.text = @"⏳ 滤镜去重渲染中..."; self->_statusLabel.textColor = [UIColor orangeColor];
+            CGFloat bVal = _brightSlider.value; CGFloat cVal = _contrastSlider.value; CGFloat sVal = _saturationSlider.value;
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{ 
+                [VCAMVideoPreprocessor processVideoAtURL:url toDestination:dest brightness:bVal contrast:cVal saturation:sVal completion:^(BOOL success, NSError *error) {
+                    dispatch_async(dispatch_get_main_queue(), ^{ 
+                        if (success) { if ([VCAMManager sharedManager].currentSlot == self->_pendingSlot) [[NSNotificationCenter defaultCenter] postNotificationName:@"VCAMChannelDidChangeNotification" object:nil]; 
+                            self->_statusLabel.text = [NSString stringWithFormat:@"🟢 VCAM [CH %ld]", (long)[VCAMManager sharedManager].currentSlot]; self->_statusLabel.textColor = [UIColor greenColor];
+                        } else { self->_statusLabel.text = @"❌ 去重渲染失败"; self->_statusLabel.textColor = [UIColor redColor]; } 
+                    });
+                }];
+            }); 
+        } else {
+            self->_statusLabel.text = @"⚡️ 极速载入..."; 
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ 
+                BOOL success = [[NSFileManager defaultManager] copyItemAtURL:url toURL:[NSURL fileURLWithPath:dest] error:nil]; 
+                dispatch_async(dispatch_get_main_queue(), ^{ 
+                    if (success) { if ([VCAMManager sharedManager].currentSlot == self->_pendingSlot) [[NSNotificationCenter defaultCenter] postNotificationName:@"VCAMChannelDidChangeNotification" object:nil]; 
+                        self->_statusLabel.text = [NSString stringWithFormat:@"🟢 VCAM [CH %ld]", (long)[VCAMManager sharedManager].currentSlot]; 
+                    } else { self->_statusLabel.text = @"❌ 极速导入失败"; } 
+                }); 
+            });
+        }
+    } 
+    [picker dismissViewControllerAnimated:YES completion:nil]; 
+}
+@end
+
+// ============================================================================
+// 【6. 地图标记与基站解析面板】
+// ============================================================================
+@implementation VCAMMapWindow { MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; }
++ (instancetype)sharedMap {
+    static VCAMMapWindow *map = nil; static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (@available(iOS 13.0, *)) { for (UIWindowScene *scene in (NSArray<UIWindowScene *>*)[UIApplication sharedApplication].connectedScenes) { if (scene.activationState == UISceneActivationStateForegroundActive) { map = [[VCAMMapWindow alloc] initWithWindowScene:scene]; map.frame = CGRectMake(10, 100, 300, 400); break; } } }
+        if (!map) map = [[VCAMMapWindow alloc] initWithFrame:CGRectMake(10, 100, 300, 400)];
+    }); return map;
+}
+- (instancetype)initWithFrame:(CGRect)frame { if (self = [super initWithFrame:frame]) { [self setupUI]; } return self; }
+- (instancetype)initWithWindowScene:(UIWindowScene *)windowScene { if (self = [super initWithWindowScene:windowScene]) { [self setupUI]; } return self; }
+- (void)setupUI {
+    self.windowLevel = UIWindowLevelStatusBar + 110; self.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95]; self.layer.cornerRadius = 16; self.layer.masksToBounds = YES; self.hidden = YES;
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 200, 20)]; title.text = @"🌍 全球定位与基站伪装"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16]; [self addSubview:title];
+    
+    _envSwitch = [[UISwitch alloc] init]; _envSwitch.transform = CGAffineTransformMakeScale(0.8, 0.8); _envSwitch.frame = CGRectMake(240, 7, 50, 31);
+    _envSwitch.on = [VCAMManager sharedManager].isEnvSpoofingEnabled;
+    [_envSwitch addTarget:self action:@selector(toggleEnvSpoofing:) forControlEvents:UIControlEventValueChanged]; [self addSubview:_envSwitch];
+    
+    _mapView = [[MKMapView alloc] initWithFrame:CGRectMake(12, 45, 276, 250)]; _mapView.layer.cornerRadius = 8; _mapView.delegate = self;
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(addPinToMap:)]; [lp setMinimumPressDuration:0.5]; [_mapView addGestureRecognizer:lp]; [self addSubview:_mapView];
+    
+    _infoLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 305, 276, 40)]; _infoLabel.numberOfLines = 2; _infoLabel.textColor = [UIColor greenColor]; _infoLabel.font = [UIFont systemFontOfSize:12]; _infoLabel.textAlignment = NSTextAlignmentCenter; [self updateInfoLabel]; [self addSubview:_infoLabel];
+    
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem]; closeBtn.frame = CGRectMake(12, 350, 276, 38); closeBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; closeBtn.layer.cornerRadius = 8; [closeBtn setTitle:@"保存并关闭地图" forState:UIControlStateNormal]; [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16]; [closeBtn addTarget:self action:@selector(closeMap) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:closeBtn];
+    
+    MKCoordinateRegion region = MKCoordinateRegionMake([VCAMManager sharedManager].fakeCoordinate, MKCoordinateSpanMake(5.0, 5.0));
+    [_mapView setRegion:region animated:NO];
+    MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init]; annotation.coordinate = [VCAMManager sharedManager].fakeCoordinate; [_mapView addAnnotation:annotation];
+}
+- (void)toggleEnvSpoofing:(UISwitch *)sender { [VCAMManager sharedManager].isEnvSpoofingEnabled = sender.isOn; [[VCAMManager sharedManager] saveEnvironmentSettings]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
+- (void)updateInfoLabel {
+    VCAMManager *mgr = [VCAMManager sharedManager];
+    _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n基站: %@ (%@-%@)", mgr.fakeCoordinate.latitude, mgr.fakeCoordinate.longitude, mgr.fakeCarrierName, mgr.fakeMCC, mgr.fakeMNC];
+}
+- (void)addPinToMap:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    CGPoint touchPoint = [gesture locationInView:_mapView];
+    CLLocationCoordinate2D coord = [_mapView convertPoint:touchPoint toCoordinateFromView:_mapView];
+    [_mapView removeAnnotations:_mapView.annotations]; MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init]; annotation.coordinate = coord; [_mapView addAnnotation:annotation];
+    [VCAMManager sharedManager].fakeCoordinate = coord;
+    
+    CLLocation *location = [[CLLocation alloc] initWithLatitude:coord.latitude longitude:coord.longitude];
+    CLGeocoder *geocoder = [[CLGeocoder alloc] init]; _infoLabel.text = @"⏳ 正在解析该国家基站信息...";
+    
+    [geocoder reverseGeocodeLocation:location completionHandler:^(NSArray<CLPlacemark *> * _Nullable placemarks, NSError * _Nullable error) {
+        if (placemarks.count > 0) {
+            NSString *countryCode = placemarks.firstObject.ISOcountryCode.lowercaseString;
+            NSString *mcc = @"262"; NSString *mnc = @"01"; NSString *carrier = @"Telekom.de"; // 默认德国
+            if ([countryCode isEqualToString:@"us"]) { mcc = @"310"; mnc = @"410"; carrier = @"AT&T"; }
+            else if ([countryCode isEqualToString:@"gb"]) { mcc = @"234"; mnc = @"15"; carrier = @"Vodafone UK"; }
+            else if ([countryCode isEqualToString:@"fr"]) { mcc = @"208"; mnc = @"01"; carrier = @"Orange F"; }
+            else if ([countryCode isEqualToString:@"it"]) { mcc = @"222"; mnc = @"01"; carrier = @"TIM"; }
+            [VCAMManager sharedManager].fakeMCC = mcc; [VCAMManager sharedManager].fakeMNC = mnc; [VCAMManager sharedManager].fakeISO = countryCode; [VCAMManager sharedManager].fakeCarrierName = carrier;
+        }
+        [[VCAMManager sharedManager] saveEnvironmentSettings]; [self updateInfoLabel];
+        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred];
+    }];
+}
+- (void)closeMap { self.hidden = YES; [[VCAMManager sharedManager] saveEnvironmentSettings]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred]; }
+@end
+
+// ============================================================================
+// 【7. 环境伪装 Hook (CoreTelephony)】
+// ============================================================================
+@implementation CTCarrier (VCAMProHook)
+- (NSString *)vcam_carrierName { return [VCAMManager sharedManager].isEnvSpoofingEnabled ? [VCAMManager sharedManager].fakeCarrierName : [self vcam_carrierName]; }
+- (NSString *)vcam_isoCountryCode { return [VCAMManager sharedManager].isEnvSpoofingEnabled ? [VCAMManager sharedManager].fakeISO : [self vcam_isoCountryCode]; }
+- (NSString *)vcam_mobileCountryCode { return [VCAMManager sharedManager].isEnvSpoofingEnabled ? [VCAMManager sharedManager].fakeMCC : [self vcam_mobileCountryCode]; }
+- (NSString *)vcam_mobileNetworkCode { return [VCAMManager sharedManager].isEnvSpoofingEnabled ? [VCAMManager sharedManager].fakeMNC : [self vcam_mobileNetworkCode]; }
+@end
+@implementation CTTelephonyNetworkInfo (VCAMProHook)
+- (NSDictionary<NSString *,CTCarrier *> *)vcam_serviceSubscriberCellularProviders {
+    if (![VCAMManager sharedManager].isEnvSpoofingEnabled) return [self vcam_serviceSubscriberCellularProviders];
+    CTCarrier *fakeCarrier = [[NSClassFromString(@"CTCarrier") alloc] init];
+    return @{@"0000000100000001": fakeCarrier};
+}
+@end
+
+// ============================================================================
+// 【8. 极致安全底层注册引擎 (+load)】
+// ============================================================================
+@implementation UIWindow (VCAMHook)
+- (void)vcam_becomeKeyWindow {
+    [self vcam_becomeKeyWindow];
+    if (![self isKindOfClass:NSClassFromString(@"VCAMHUDWindow")] && ![self isKindOfClass:NSClassFromString(@"VCAMMapWindow")] && !objc_getAssociatedObject(self, "_vcam_g")) {
+        // 三指长按 -> 视频控制台
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:[VCAMManager sharedManager] action:@selector(handleTwoFingerLongPress:)];
+        lp.numberOfTouchesRequired = 3; lp.minimumPressDuration = 0.5; lp.cancelsTouchesInView = NO; lp.delegate = [VCAMManager sharedManager]; [self addGestureRecognizer:lp];
+        // 四指长按 -> 全球地图基站伪装
+        UILongPressGestureRecognizer *mapLp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showMapPanel)];
+        mapLp.numberOfTouchesRequired = 4; mapLp.minimumPressDuration = 0.5; mapLp.cancelsTouchesInView = NO; [self addGestureRecognizer:mapLp];
+        objc_setAssociatedObject(self, "_vcam_g", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+- (void)showMapPanel { [VCAMMapWindow sharedMap].hidden = NO; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred]; }
+@end
+
+@implementation AVCaptureVideoDataOutput (VCAMHook)
+- (void)vcam_setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
+    if (delegate && !object_getClass(delegate) == NSClassFromString(@"VCAMUnifiedProxy")) { VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_vcam_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self vcam_setSampleBufferDelegate:proxy queue:queue];
+    } else { [self vcam_setSampleBufferDelegate:delegate queue:queue]; }
+}
+@end
+@implementation AVCaptureDataOutputSynchronizer (VCAMHook)
+- (void)vcam_setDelegate:(id)delegate queue:(dispatch_queue_t)queue {
+    if (delegate && !object_getClass(delegate) == NSClassFromString(@"VCAMUnifiedProxy")) { VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_vcam_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self vcam_setDelegate:proxy queue:queue];
+    } else { [self vcam_setDelegate:delegate queue:queue]; }
+}
+@end
+@implementation AVCaptureMetadataOutput (VCAMHook)
+- (void)vcam_setMetadataObjectsDelegate:(id)delegate queue:(dispatch_queue_t)queue {
+    if (delegate && !object_getClass(delegate) == NSClassFromString(@"VCAMUnifiedProxy")) { VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_vcam_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self vcam_setMetadataObjectsDelegate:proxy queue:queue];
+    } else { [self vcam_setMetadataObjectsDelegate:delegate queue:queue]; }
+}
+@end
+@implementation CLLocationManager (VCAMHook)
+- (void)vcam_setDelegate:(id<CLLocationManagerDelegate>)delegate {
+    if (delegate && !object_getClass(delegate) == NSClassFromString(@"VCAMUnifiedProxy")) { VCAMUnifiedProxy *proxy = [VCAMUnifiedProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_vcam_loc_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self vcam_setDelegate:proxy];
+    } else { [self vcam_setDelegate:delegate]; }
+}
+@end
+
+@interface VCAMLoader : NSObject
+@end
+@implementation VCAMLoader
++ (void)load {
+    dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW);
+    dlopen("/System/Library/Frameworks/CoreLocation.framework/CoreLocation", RTLD_NOW);
+    dlopen("/System/Library/Frameworks/CoreTelephony.framework/CoreTelephony", RTLD_NOW);
+    
+    method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(becomeKeyWindow)), class_getInstanceMethod([UIWindow class], @selector(vcam_becomeKeyWindow)));
+    Class vdoClass = NSClassFromString(@"AVCaptureVideoDataOutput"); if (vdoClass) method_exchangeImplementations(class_getInstanceMethod(vdoClass, @selector(setSampleBufferDelegate:queue:)), class_getInstanceMethod(vdoClass, @selector(vcam_setSampleBufferDelegate:queue:)));
+    Class syncClass = NSClassFromString(@"AVCaptureDataOutputSynchronizer"); if (syncClass) method_exchangeImplementations(class_getInstanceMethod(syncClass, @selector(setDelegate:queue:)), class_getInstanceMethod(syncClass, @selector(vcam_setDelegate:queue:)));
+    Class metaClass = NSClassFromString(@"AVCaptureMetadataOutput"); if (metaClass) method_exchangeImplementations(class_getInstanceMethod(metaClass, @selector(setMetadataObjectsDelegate:queue:)), class_getInstanceMethod(metaClass, @selector(vcam_setMetadataObjectsDelegate:queue:)));
+    Class locClass = NSClassFromString(@"CLLocationManager"); if (locClass) method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(setDelegate:)), class_getInstanceMethod(locClass, @selector(vcam_setDelegate:)));
+    
+    Class carrierClass = NSClassFromString(@"CTCarrier");
+    if (carrierClass) {
+        method_exchangeImplementations(class_getInstanceMethod(carrierClass, @selector(carrierName)), class_getInstanceMethod(carrierClass, @selector(vcam_carrierName)));
+        method_exchangeImplementations(class_getInstanceMethod(carrierClass, @selector(isoCountryCode)), class_getInstanceMethod(carrierClass, @selector(vcam_isoCountryCode)));
+        method_exchangeImplementations(class_getInstanceMethod(carrierClass, @selector(mobileCountryCode)), class_getInstanceMethod(carrierClass, @selector(vcam_mobileCountryCode)));
+        method_exchangeImplementations(class_getInstanceMethod(carrierClass, @selector(mobileNetworkCode)), class_getInstanceMethod(carrierClass, @selector(vcam_mobileNetworkCode)));
+    }
+    Class netInfoClass = NSClassFromString(@"CTTelephonyNetworkInfo");
+    if (netInfoClass) method_exchangeImplementations(class_getInstanceMethod(netInfoClass, @selector(serviceSubscriberCellularProviders)), class_getInstanceMethod(netInfoClass, @selector(vcam_serviceSubscriberCellularProviders)));
+}
+@end
+#pragma clang diagnostic pop
