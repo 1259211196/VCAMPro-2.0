@@ -373,8 +373,11 @@ static CLLocation* generatePerfectFakeLocation(void) {
     _saturationSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 230, 220, 20)]; _saturationSlider.minimumValue = 0.0; _saturationSlider.maximumValue = 2.0; _saturationSlider.value = 1.0; [self addSubview:_saturationSlider];
 }
 
-- (void)hideHUD { self.hidden = YES; [AVStreamManager sharedManager].isHUDVisible = NO; [[AVStreamManager sharedManager] updateDisplayLayers]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
+// 🌟 修复：已彻底剔除旧版 updateDisplayLayers 的残留调用
+- (void)hideHUD { self.hidden = YES; [AVStreamManager sharedManager].isHUDVisible = NO; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
+
 - (void)togglePower:(UISwitch *)sender { [AVStreamManager sharedManager].isEnabled = sender.isOn; if (sender.isOn) { _statusLabel.text = @"🟢 V-Cam [单通道引擎]"; _statusLabel.textColor = [UIColor greenColor]; } else { _statusLabel.text = @"🔴 已禁用"; _statusLabel.textColor = [UIColor redColor]; } UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
+
 - (void)handlePan:(UIPanGestureRecognizer *)pan { CGPoint trans = [pan translationInView:self]; self.center = CGPointMake(self.center.x + trans.x, self.center.y + trans.y); [pan setTranslation:CGPointZero inView:self]; }
 
 // 🌟 直接调起相册，无需长按
