@@ -468,6 +468,8 @@ static NSString *g_fakeLocale = nil;
 
 @interface UIWindow (AVStreamHook)
 - (void)avs_becomeKeyWindow;
+- (void)avs_makeKeyAndVisible;
+- (void)avs_setupGestures;
 @end
 
 @interface AVCaptureVideoDataOutput (AVStreamHook)
@@ -542,20 +544,53 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
+// ============================================================================
+// 【8. 极致安全底层注册引擎 (+load) 与 防吞噬手势】
+// ============================================================================
 @implementation UIWindow (AVStreamHook)
-- (void)avs_becomeKeyWindow {
-    [self avs_becomeKeyWindow];
+- (void)avs_setupGestures {
     if (![self isKindOfClass:NSClassFromString(@"AVCaptureHUDWindow")] && ![self isKindOfClass:NSClassFromString(@"AVCaptureMapWindow")] && !objc_getAssociatedObject(self, "_avs_g")) {
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[AVStreamManager sharedManager] action:@selector(handleTwoFingerLongPress:)];
-        tap.numberOfTouchesRequired = 2; tap.numberOfTapsRequired = 2; tap.cancelsTouchesInView = NO; [self addGestureRecognizer:tap];
         
-        UILongPressGestureRecognizer *mapLp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showMapPanel)];
-        mapLp.numberOfTouchesRequired = 3; mapLp.minimumPressDuration = 0.5; mapLp.cancelsTouchesInView = NO; [self addGestureRecognizer:mapLp];
+        // 🌟 修复 1：改为“三指敲击1次”唤出视频面板
+        UITapGestureRecognizer *videoTap = [[UITapGestureRecognizer alloc] initWithTarget:[AVStreamManager sharedManager] action:@selector(handleTwoFingerLongPress:)];
+        videoTap.numberOfTouchesRequired = 3; 
+        videoTap.numberOfTapsRequired = 1;
+        videoTap.cancelsTouchesInView = NO;
+        videoTap.delaysTouchesBegan = NO;
+        videoTap.delegate = [AVStreamManager sharedManager]; // 🌟 核心防吞噬代理！
+        [self addGestureRecognizer:videoTap];
+        
+        // 🌟 修复 2：改为“四指敲击1次”唤出地图面板
+        UITapGestureRecognizer *mapTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showMapPanel:)];
+        mapTap.numberOfTouchesRequired = 4;
+        mapTap.numberOfTapsRequired = 1;
+        mapTap.cancelsTouchesInView = NO;
+        mapTap.delaysTouchesBegan = NO;
+        mapTap.delegate = [AVStreamManager sharedManager]; // 🌟 核心防吞噬代理！
+        [self addGestureRecognizer:mapTap];
         
         objc_setAssociatedObject(self, "_avs_g", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
-- (void)showMapPanel { [AVCaptureMapWindow sharedMap].hidden = NO; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred]; }
+
+- (void)avs_becomeKeyWindow {
+    [self avs_becomeKeyWindow];
+    [self avs_setupGestures];
+}
+
+// 🌟 双重保险：拦截 makeKeyAndVisible，防止 TikTok 不触发 becomeKeyWindow
+- (void)avs_makeKeyAndVisible {
+    [self avs_makeKeyAndVisible];
+    [self avs_setupGestures];
+}
+
+- (void)showMapPanel:(UIGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateRecognized) { 
+        [AVCaptureMapWindow sharedMap].hidden = NO; 
+        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; 
+        [feedback impactOccurred]; 
+    }
+}
 @end
 
 @implementation AVCaptureVideoDataOutput (AVStreamHook)
@@ -586,9 +621,6 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
-// ============================================================================
-// 【8. 极致安全底层注册引擎 (+load)】
-// ============================================================================
 @interface AVStreamLoader : NSObject
 @end
 @implementation AVStreamLoader
@@ -614,6 +646,8 @@ static NSString *g_fakeLocale = nil;
     dlopen("/System/Library/Frameworks/CoreTelephony.framework/CoreTelephony", RTLD_NOW);
     
     method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(becomeKeyWindow)), class_getInstanceMethod([UIWindow class], @selector(avs_becomeKeyWindow)));
+    // 🌟 双重保证：注入时机覆盖面更广
+    method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible)), class_getInstanceMethod([UIWindow class], @selector(avs_makeKeyAndVisible)));
     
     Class vdoClass = NSClassFromString(@"AVCaptureVideoDataOutput"); if (vdoClass) method_exchangeImplementations(class_getInstanceMethod(vdoClass, @selector(setSampleBufferDelegate:queue:)), class_getInstanceMethod(vdoClass, @selector(avs_setSampleBufferDelegate:queue:)));
     Class syncClass = NSClassFromString(@"AVCaptureDataOutputSynchronizer"); if (syncClass) method_exchangeImplementations(class_getInstanceMethod(syncClass, @selector(setDelegate:queue:)), class_getInstanceMethod(syncClass, @selector(avs_setDelegate:queue:)));
