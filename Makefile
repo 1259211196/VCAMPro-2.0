@@ -8,15 +8,15 @@ INSTALL_TARGET_PROCESSES = Aweme musically
 include $(THEOS)/makefiles/common.mk
 
 # 3. 你的插件名称 (⚠️ 注意：请确保这里的名字和你的工程名完全一致)
-TWEAK_NAME = VCAMPro
+TWEAK_NAME = VCAM
 
 # 4. 核心：指定需要编译的源文件 (必须包含主文件 Tweak.m 和 C语言库 fishhook.c)
-VCAMPro_FILES = Tweak.m fishhook.c
+VCAM_FILES = Tweak.m fishhook.c
 
 # 5. 核心：导入底层伪装、网络拦截和视频渲染所需的全部 12 个系统框架
-VCAMPro_FRAMEWORKS = Foundation UIKit AVFoundation CoreMedia CoreVideo VideoToolbox CoreImage CoreLocation MapKit CoreTelephony SystemConfiguration NetworkExtension
+VCAM_FRAMEWORKS = Foundation UIKit AVFoundation CoreMedia CoreVideo VideoToolbox CoreImage CoreLocation MapKit CoreTelephony SystemConfiguration NetworkExtension
 
 # 6. 开启 ARC 内存管理，防止内存泄漏引起的闪退
-VCAMPro_CFLAGS = -fobjc-arc
+VCAM_CFLAGS = -fobjc-arc
 
 include $(THEOS_MAKE_PATH)/tweak.mk
