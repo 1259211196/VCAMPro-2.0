@@ -10,12 +10,25 @@
 #import <CoreTelephony/CTCarrier.h>
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <objc/runtime.h>
-#import <objc/message.h>   // 🌟 仅仅新增了这一行！解决编译报错
+#import <objc/message.h>
 #import <dlfcn.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
 #pragma clang diagnostic ignored "-Wavailability"
+
+// ============================================================================
+// 【0. 极致安全的 C 语言静态缓存 (彻底杜绝启动死锁)】
+// ============================================================================
+static BOOL g_envSpoofingEnabled = NO;
+static double g_fakeLat = 0.0;
+static double g_fakeLon = 0.0;
+static NSString *g_fakeMCC = nil;
+static NSString *g_fakeMNC = nil;
+static NSString *g_fakeISO = nil;
+static NSString *g_fakeCarrierName = nil;
+static NSString *g_fakeTZ = nil;
+static NSString *g_fakeLocale = nil;
 
 // ============================================================================
 // 【1. 全局环境大管家】
@@ -30,16 +43,9 @@
 @property (nonatomic, strong) NSHashTable *displayLayers;
 @property (nonatomic, strong) VCAMCoreProcessor *processor;
 
-@property (nonatomic, assign) BOOL isEnvSpoofingEnabled;
-@property (nonatomic, assign) CLLocationCoordinate2D fakeCoordinate;
-@property (nonatomic, copy) NSString *fakeMCC;
-@property (nonatomic, copy) NSString *fakeMNC;
-@property (nonatomic, copy) NSString *fakeISO;
-@property (nonatomic, copy) NSString *fakeCarrierName;
-
 - (void)updateDisplayLayers;
 - (void)saveEnvironmentSettings;
-- (void)loadEnvironmentSettings;
+- (void)syncGlobalsToProperties;
 @end
 
 @interface VCAMHUDWindow : UIWindow <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
@@ -172,7 +178,6 @@
     static VCAMManager *mgr = nil; static dispatch_once_t once;
     dispatch_once(&once, ^{ 
         mgr = [[VCAMManager alloc] init]; mgr.isEnabled = YES; mgr.isHUDVisible = NO; mgr.currentSlot = 1; mgr.displayLayers = [NSHashTable weakObjectsHashTable]; mgr.processor = [[VCAMCoreProcessor alloc] init]; 
-        [mgr loadEnvironmentSettings];
     });
     return mgr;
 }
@@ -187,25 +192,19 @@
     }
 }
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer { return YES; }
+
 - (void)saveEnvironmentSettings {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults setBool:self.isEnvSpoofingEnabled forKey:@"vcam_env_enabled"];
-    [defaults setDouble:self.fakeCoordinate.latitude forKey:@"vcam_env_lat"];
-    [defaults setDouble:self.fakeCoordinate.longitude forKey:@"vcam_env_lon"];
-    if (self.fakeMCC) [defaults setObject:self.fakeMCC forKey:@"vcam_env_mcc"];
-    if (self.fakeMNC) [defaults setObject:self.fakeMNC forKey:@"vcam_env_mnc"];
-    if (self.fakeISO) [defaults setObject:self.fakeISO forKey:@"vcam_env_iso"];
-    if (self.fakeCarrierName) [defaults setObject:self.fakeCarrierName forKey:@"vcam_env_carrier"];
+    [defaults setBool:g_envSpoofingEnabled forKey:@"vcam_env_enabled"];
+    [defaults setDouble:g_fakeLat forKey:@"vcam_env_lat"];
+    [defaults setDouble:g_fakeLon forKey:@"vcam_env_lon"];
+    if (g_fakeMCC) [defaults setObject:g_fakeMCC forKey:@"vcam_env_mcc"];
+    if (g_fakeMNC) [defaults setObject:g_fakeMNC forKey:@"vcam_env_mnc"];
+    if (g_fakeISO) [defaults setObject:g_fakeISO forKey:@"vcam_env_iso"];
+    if (g_fakeCarrierName) [defaults setObject:g_fakeCarrierName forKey:@"vcam_env_carrier"];
+    if (g_fakeTZ) [defaults setObject:g_fakeTZ forKey:@"vcam_env_tz"];
+    if (g_fakeLocale) [defaults setObject:g_fakeLocale forKey:@"vcam_env_locale"];
     [defaults synchronize];
-}
-- (void)loadEnvironmentSettings {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    self.isEnvSpoofingEnabled = [defaults boolForKey:@"vcam_env_enabled"];
-    self.fakeCoordinate = CLLocationCoordinate2DMake([defaults doubleForKey:@"vcam_env_lat"], [defaults doubleForKey:@"vcam_env_lon"]);
-    self.fakeMCC = [defaults stringForKey:@"vcam_env_mcc"] ?: @"262";
-    self.fakeMNC = [defaults stringForKey:@"vcam_env_mnc"] ?: @"01";
-    self.fakeISO = [defaults stringForKey:@"vcam_env_iso"] ?: @"de";
-    self.fakeCarrierName = [defaults stringForKey:@"vcam_env_carrier"] ?: @"Telekom.de";
 }
 @end
 
@@ -245,8 +244,9 @@
     @autoreleasepool { NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:metadataObjects.count]; BOOL shouldFilter = ([VCAMManager sharedManager].isEnabled && [VCAMManager sharedManager].isHUDVisible); for (AVMetadataObject *obj in metadataObjects) { if (shouldFilter && [obj.type isEqualToString:AVMetadataObjectTypeFace]) continue; [filtered addObject:obj]; } if ([self.target respondsToSelector:_cmd]) [self.target captureOutput:output didOutputMetadataObjects:filtered fromConnection:connection]; }
 }
 - (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
-    if ([VCAMManager sharedManager].isEnvSpoofingEnabled && locations.count > 0) {
-        CLLocation *fakeLoc = [[CLLocation alloc] initWithCoordinate:[VCAMManager sharedManager].fakeCoordinate altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
+    if (g_envSpoofingEnabled && locations.count > 0) {
+        CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat, g_fakeLon);
+        CLLocation *fakeLoc = [[CLLocation alloc] initWithCoordinate:c altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
         if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:@[fakeLoc]];
     } else {
         if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:locations];
@@ -365,7 +365,7 @@
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 200, 20)]; title.text = @"🌍 全球定位与基站伪装"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16]; [self addSubview:title];
     
     _envSwitch = [[UISwitch alloc] init]; _envSwitch.transform = CGAffineTransformMakeScale(0.8, 0.8); _envSwitch.frame = CGRectMake(240, 7, 50, 31);
-    _envSwitch.on = [VCAMManager sharedManager].isEnvSpoofingEnabled;
+    _envSwitch.on = g_envSpoofingEnabled;
     [_envSwitch addTarget:self action:@selector(toggleEnvSpoofing:) forControlEvents:UIControlEventValueChanged]; [self addSubview:_envSwitch];
     
     _mapView = [[MKMapView alloc] initWithFrame:CGRectMake(12, 45, 276, 250)]; _mapView.layer.cornerRadius = 8; _mapView.delegate = self;
@@ -373,23 +373,30 @@
     
     _infoLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 305, 276, 40)]; _infoLabel.numberOfLines = 2; _infoLabel.textColor = [UIColor greenColor]; _infoLabel.font = [UIFont systemFontOfSize:12]; _infoLabel.textAlignment = NSTextAlignmentCenter; [self updateInfoLabel]; [self addSubview:_infoLabel];
     
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem]; closeBtn.frame = CGRectMake(12, 350, 276, 38); closeBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; closeBtn.layer.cornerRadius = 8; [closeBtn setTitle:@"保存并关闭地图" forState:UIControlStateNormal]; [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16]; [closeBtn addTarget:self action:@selector(closeMap) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:closeBtn];
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem]; closeBtn.frame = CGRectMake(12, 350, 276, 38); closeBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; closeBtn.layer.cornerRadius = 8; [closeBtn setTitle:@"保存并关闭" forState:UIControlStateNormal]; [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16]; [closeBtn addTarget:self action:@selector(closeMap) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:closeBtn];
     
-    MKCoordinateRegion region = MKCoordinateRegionMake([VCAMManager sharedManager].fakeCoordinate, MKCoordinateSpanMake(5.0, 5.0));
+    CLLocationCoordinate2D initialCoord = CLLocationCoordinate2DMake(g_fakeLat, g_fakeLon);
+    if (g_fakeLat == 0 && g_fakeLon == 0) initialCoord = CLLocationCoordinate2DMake(50.1109, 8.6821); // 默认法兰克福
+    MKCoordinateRegion region = MKCoordinateRegionMake(initialCoord, MKCoordinateSpanMake(5.0, 5.0));
     [_mapView setRegion:region animated:NO];
-    MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init]; annotation.coordinate = [VCAMManager sharedManager].fakeCoordinate; [_mapView addAnnotation:annotation];
+    MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init]; annotation.coordinate = initialCoord; [_mapView addAnnotation:annotation];
 }
-- (void)toggleEnvSpoofing:(UISwitch *)sender { [VCAMManager sharedManager].isEnvSpoofingEnabled = sender.isOn; [[VCAMManager sharedManager] saveEnvironmentSettings]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
+- (void)toggleEnvSpoofing:(UISwitch *)sender { 
+    g_envSpoofingEnabled = sender.isOn; 
+    [[VCAMManager sharedManager] saveEnvironmentSettings]; 
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; 
+}
 - (void)updateInfoLabel {
-    VCAMManager *mgr = [VCAMManager sharedManager];
-    _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n基站: %@ (%@-%@)", mgr.fakeCoordinate.latitude, mgr.fakeCoordinate.longitude, mgr.fakeCarrierName, mgr.fakeMCC, mgr.fakeMNC];
+    _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n基站: %@ (%@-%@)", g_fakeLat, g_fakeLon, g_fakeCarrierName, g_fakeMCC, g_fakeMNC];
 }
 - (void)addPinToMap:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateBegan) return;
     CGPoint touchPoint = [gesture locationInView:_mapView];
     CLLocationCoordinate2D coord = [_mapView convertPoint:touchPoint toCoordinateFromView:_mapView];
     [_mapView removeAnnotations:_mapView.annotations]; MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init]; annotation.coordinate = coord; [_mapView addAnnotation:annotation];
-    [VCAMManager sharedManager].fakeCoordinate = coord;
+    
+    g_fakeLat = coord.latitude;
+    g_fakeLon = coord.longitude;
     
     CLLocation *location = [[CLLocation alloc] initWithLatitude:coord.latitude longitude:coord.longitude];
     CLGeocoder *geocoder = [[CLGeocoder alloc] init]; _infoLabel.text = @"⏳ 正在解析该国家基站与时区信息...";
@@ -397,7 +404,7 @@
     [geocoder reverseGeocodeLocation:location completionHandler:^(NSArray<CLPlacemark *> * _Nullable placemarks, NSError * _Nullable error) {
         if (placemarks.count > 0) {
             NSString *countryCode = placemarks.firstObject.ISOcountryCode.lowercaseString;
-            NSString *mcc = @"262"; NSString *mnc = @"01"; NSString *carrier = @"Telekom.de"; // 默认德国
+            NSString *mcc = @"262"; NSString *mnc = @"01"; NSString *carrier = @"Telekom.de"; 
             NSString *timezone = @"Europe/Berlin"; NSString *locale = @"de_DE";
             
             if ([countryCode isEqualToString:@"us"]) { mcc = @"310"; mnc = @"410"; carrier = @"AT&T"; timezone = @"America/New_York"; locale = @"en_US"; }
@@ -405,9 +412,8 @@
             else if ([countryCode isEqualToString:@"fr"]) { mcc = @"208"; mnc = @"01"; carrier = @"Orange F"; timezone = @"Europe/Paris"; locale = @"fr_FR"; }
             else if ([countryCode isEqualToString:@"it"]) { mcc = @"222"; mnc = @"01"; carrier = @"TIM"; timezone = @"Europe/Rome"; locale = @"it_IT"; }
             
-            [VCAMManager sharedManager].fakeMCC = mcc; [VCAMManager sharedManager].fakeMNC = mnc; [VCAMManager sharedManager].fakeISO = countryCode; [VCAMManager sharedManager].fakeCarrierName = carrier;
-            [[NSUserDefaults standardUserDefaults] setObject:timezone forKey:@"vcam_env_tz"];
-            [[NSUserDefaults standardUserDefaults] setObject:locale forKey:@"vcam_env_locale"];
+            g_fakeMCC = mcc; g_fakeMNC = mnc; g_fakeISO = countryCode; g_fakeCarrierName = carrier;
+            g_fakeTZ = timezone; g_fakeLocale = locale;
         }
         [[VCAMManager sharedManager] saveEnvironmentSettings]; [self updateInfoLabel];
         UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred];
@@ -417,55 +423,46 @@
 @end
 
 // ============================================================================
-// 【7. 全栈环境伪装 Hook (基站/GPS直读/语言/时区)】
+// 【7. 彻底断开死锁：全栈安全底层 Hook (完全读取静态内存)】
 // ============================================================================
 @implementation CTCarrier (VCAMProHook)
-- (NSString *)vcam_carrierName { return [VCAMManager sharedManager].isEnvSpoofingEnabled ? [VCAMManager sharedManager].fakeCarrierName : [self vcam_carrierName]; }
-- (NSString *)vcam_isoCountryCode { return [VCAMManager sharedManager].isEnvSpoofingEnabled ? [VCAMManager sharedManager].fakeISO : [self vcam_isoCountryCode]; }
-- (NSString *)vcam_mobileCountryCode { return [VCAMManager sharedManager].isEnvSpoofingEnabled ? [VCAMManager sharedManager].fakeMCC : [self vcam_mobileCountryCode]; }
-- (NSString *)vcam_mobileNetworkCode { return [VCAMManager sharedManager].isEnvSpoofingEnabled ? [VCAMManager sharedManager].fakeMNC : [self vcam_mobileNetworkCode]; }
+- (NSString *)vcam_carrierName { return g_envSpoofingEnabled && g_fakeCarrierName ? g_fakeCarrierName : [self vcam_carrierName]; }
+- (NSString *)vcam_isoCountryCode { return g_envSpoofingEnabled && g_fakeISO ? g_fakeISO : [self vcam_isoCountryCode]; }
+- (NSString *)vcam_mobileCountryCode { return g_envSpoofingEnabled && g_fakeMCC ? g_fakeMCC : [self vcam_mobileCountryCode]; }
+- (NSString *)vcam_mobileNetworkCode { return g_envSpoofingEnabled && g_fakeMNC ? g_fakeMNC : [self vcam_mobileNetworkCode]; }
 @end
 @implementation CTTelephonyNetworkInfo (VCAMProHook)
 - (NSDictionary<NSString *,CTCarrier *> *)vcam_serviceSubscriberCellularProviders {
-    if (![VCAMManager sharedManager].isEnvSpoofingEnabled) return [self vcam_serviceSubscriberCellularProviders];
+    if (!g_envSpoofingEnabled) return [self vcam_serviceSubscriberCellularProviders];
     CTCarrier *fakeCarrier = [[NSClassFromString(@"CTCarrier") alloc] init];
     return @{@"0000000100000001": fakeCarrier};
 }
 @end
 
-// 🌟 拦截 App 强行获取真实定位
 @implementation CLLocationManager (VCAMProLocationHook)
 - (CLLocation *)vcam_location {
-    if ([VCAMManager sharedManager].isEnvSpoofingEnabled) { return [[CLLocation alloc] initWithCoordinate:[VCAMManager sharedManager].fakeCoordinate altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]]; }
+    if (g_envSpoofingEnabled) { 
+        CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat, g_fakeLon);
+        return [[CLLocation alloc] initWithCoordinate:c altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]]; 
+    }
     return [self vcam_location];
 }
 @end
 
-// 🌟 全局时区欺骗
 @implementation NSTimeZone (VCAMProHook)
 + (NSTimeZone *)vcam_systemTimeZone {
-    if ([VCAMManager sharedManager].isEnvSpoofingEnabled) {
-        NSString *tzName = [[NSUserDefaults standardUserDefaults] stringForKey:@"vcam_env_tz"] ?: @"Europe/Berlin";
-        NSTimeZone *tz = [NSTimeZone timeZoneWithName:tzName]; if (tz) return tz;
-    }
+    if (g_envSpoofingEnabled && g_fakeTZ) { NSTimeZone *tz = [NSTimeZone timeZoneWithName:g_fakeTZ]; if (tz) return tz; }
     return [self vcam_systemTimeZone];
 }
 + (NSTimeZone *)vcam_defaultTimeZone {
-    if ([VCAMManager sharedManager].isEnvSpoofingEnabled) {
-        NSString *tzName = [[NSUserDefaults standardUserDefaults] stringForKey:@"vcam_env_tz"] ?: @"Europe/Berlin";
-        NSTimeZone *tz = [NSTimeZone timeZoneWithName:tzName]; if (tz) return tz;
-    }
+    if (g_envSpoofingEnabled && g_fakeTZ) { NSTimeZone *tz = [NSTimeZone timeZoneWithName:g_fakeTZ]; if (tz) return tz; }
     return [self vcam_defaultTimeZone];
 }
 @end
 
-// 🌟 全局系统语言与地区欺骗
 @implementation NSLocale (VCAMProHook)
 + (NSLocale *)vcam_currentLocale {
-    if ([VCAMManager sharedManager].isEnvSpoofingEnabled) {
-        NSString *locId = [[NSUserDefaults standardUserDefaults] stringForKey:@"vcam_env_locale"] ?: @"de_DE";
-        return [NSLocale localeWithLocaleIdentifier:locId];
-    }
+    if (g_envSpoofingEnabled && g_fakeLocale) { return [NSLocale localeWithLocaleIdentifier:g_fakeLocale]; }
     return [self vcam_currentLocale];
 }
 @end
@@ -477,11 +474,9 @@
 - (void)vcam_becomeKeyWindow {
     [self vcam_becomeKeyWindow];
     if (![self isKindOfClass:NSClassFromString(@"VCAMHUDWindow")] && ![self isKindOfClass:NSClassFromString(@"VCAMMapWindow")] && !objc_getAssociatedObject(self, "_vcam_g")) {
-        // 🌟 修正1：双指双击 -> 视频控制台
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[VCAMManager sharedManager] action:@selector(handleTwoFingerLongPress:)];
         tap.numberOfTouchesRequired = 2; tap.numberOfTapsRequired = 2; tap.cancelsTouchesInView = NO; [self addGestureRecognizer:tap];
         
-        // 🌟 修正2：三指长按 -> 全球定位基站面板
         UILongPressGestureRecognizer *mapLp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showMapPanel)];
         mapLp.numberOfTouchesRequired = 3; mapLp.minimumPressDuration = 0.5; mapLp.cancelsTouchesInView = NO; [self addGestureRecognizer:mapLp];
         
@@ -491,7 +486,6 @@
 - (void)showMapPanel { [VCAMMapWindow sharedMap].hidden = NO; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred]; }
 @end
 
-// 🌟 修正3：解决底层逻辑 Bug，确保真正能够拦截原视频流！
 @implementation AVCaptureVideoDataOutput (VCAMHook)
 - (void)vcam_setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMUnifiedProxy")]) { 
@@ -501,7 +495,6 @@
     } else { [self vcam_setSampleBufferDelegate:delegate queue:queue]; }
 }
 @end
-
 @implementation AVCaptureDataOutputSynchronizer (VCAMHook)
 - (void)vcam_setDelegate:(id)delegate queue:(dispatch_queue_t)queue {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMUnifiedProxy")]) { 
@@ -511,7 +504,6 @@
     } else { [self vcam_setDelegate:delegate queue:queue]; }
 }
 @end
-
 @implementation AVCaptureMetadataOutput (VCAMHook)
 - (void)vcam_setMetadataObjectsDelegate:(id)delegate queue:(dispatch_queue_t)queue {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMUnifiedProxy")]) { 
@@ -521,7 +513,6 @@
     } else { [self vcam_setMetadataObjectsDelegate:delegate queue:queue]; }
 }
 @end
-
 @implementation CLLocationManager (VCAMHook)
 - (void)vcam_setDelegate:(id<CLLocationManagerDelegate>)delegate {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMUnifiedProxy")]) { 
@@ -536,25 +527,36 @@
 @end
 @implementation VCAMLoader
 + (void)load {
+    // 🌟 在进程启动的第一毫秒，安全读取配置存入静态 C 内存中，绝对不触发死锁！
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    g_envSpoofingEnabled = [defaults boolForKey:@"vcam_env_enabled"];
+    g_fakeLat = [defaults doubleForKey:@"vcam_env_lat"];
+    g_fakeLon = [defaults doubleForKey:@"vcam_env_lon"];
+    g_fakeMCC = [defaults stringForKey:@"vcam_env_mcc"] ?: @"262";
+    g_fakeMNC = [defaults stringForKey:@"vcam_env_mnc"] ?: @"01";
+    g_fakeISO = [defaults stringForKey:@"vcam_env_iso"] ?: @"de";
+    g_fakeCarrierName = [defaults stringForKey:@"vcam_env_carrier"] ?: @"Telekom.de";
+    g_fakeTZ = [defaults stringForKey:@"vcam_env_tz"] ?: @"Europe/Berlin";
+    g_fakeLocale = [defaults stringForKey:@"vcam_env_locale"] ?: @"de_DE";
+
+    // 🌟 新增修复：强制将地图依赖库读入内存，防止 App 因为没有集成 MapKit 而崩溃
+    dlopen("/System/Library/Frameworks/MapKit.framework/MapKit", RTLD_NOW);
     dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW);
     dlopen("/System/Library/Frameworks/CoreLocation.framework/CoreLocation", RTLD_NOW);
     dlopen("/System/Library/Frameworks/CoreTelephony.framework/CoreTelephony", RTLD_NOW);
     
     method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(becomeKeyWindow)), class_getInstanceMethod([UIWindow class], @selector(vcam_becomeKeyWindow)));
     
-    // 视觉劫持注册
     Class vdoClass = NSClassFromString(@"AVCaptureVideoDataOutput"); if (vdoClass) method_exchangeImplementations(class_getInstanceMethod(vdoClass, @selector(setSampleBufferDelegate:queue:)), class_getInstanceMethod(vdoClass, @selector(vcam_setSampleBufferDelegate:queue:)));
     Class syncClass = NSClassFromString(@"AVCaptureDataOutputSynchronizer"); if (syncClass) method_exchangeImplementations(class_getInstanceMethod(syncClass, @selector(setDelegate:queue:)), class_getInstanceMethod(syncClass, @selector(vcam_setDelegate:queue:)));
     Class metaClass = NSClassFromString(@"AVCaptureMetadataOutput"); if (metaClass) method_exchangeImplementations(class_getInstanceMethod(metaClass, @selector(setMetadataObjectsDelegate:queue:)), class_getInstanceMethod(metaClass, @selector(vcam_setMetadataObjectsDelegate:queue:)));
     
-    // 定位劫持注册
     Class locClass = NSClassFromString(@"CLLocationManager"); 
     if (locClass) {
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(setDelegate:)), class_getInstanceMethod(locClass, @selector(vcam_setDelegate:)));
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(location)), class_getInstanceMethod(locClass, @selector(vcam_location)));
     }
     
-    // 基站劫持注册
     Class carrierClass = NSClassFromString(@"CTCarrier");
     if (carrierClass) {
         method_exchangeImplementations(class_getInstanceMethod(carrierClass, @selector(carrierName)), class_getInstanceMethod(carrierClass, @selector(vcam_carrierName)));
@@ -565,7 +567,6 @@
     Class netInfoClass = NSClassFromString(@"CTTelephonyNetworkInfo");
     if (netInfoClass) method_exchangeImplementations(class_getInstanceMethod(netInfoClass, @selector(serviceSubscriberCellularProviders)), class_getInstanceMethod(netInfoClass, @selector(vcam_serviceSubscriberCellularProviders)));
     
-    // 时区与语言劫持注册
     Class tzClass = NSClassFromString(@"NSTimeZone");
     if (tzClass) {
         method_exchangeImplementations(class_getClassMethod(tzClass, @selector(systemTimeZone)), class_getClassMethod(tzClass, @selector(vcam_systemTimeZone)));
