@@ -41,7 +41,7 @@ extern "C" {
 static BOOL g_envSpoofingEnabled = NO;
 static double g_fakeLat = 0.0;
 static double g_fakeLon = 0.0;
-// 🌟 引入“幽灵偏移量”：模拟真实的 GPS 漂移 (Drift)，让坐标看起来像活人
+// 🌟 引入“幽灵偏移量”：模拟真实的 GPS 漂移 (Drift)
 static double g_driftLat = 0.0; 
 static double g_driftLon = 0.0;
 
@@ -52,7 +52,6 @@ static NSString *g_fakeCarrierName = nil;
 static NSString *g_fakeTZ = nil;
 static NSString *g_fakeLocale = nil;
 
-// 🌟 终极防御 (Wi-Fi 伪装): 静态缓存
 static NSString *g_fakeSSID = nil;
 static NSString *g_fakeBSSID = nil;
 
@@ -63,7 +62,7 @@ static NSString *g_fakeBSSID = nil;
 
 @interface AVStreamManager : NSObject <UIGestureRecognizerDelegate>
 + (instancetype)sharedManager;
-@property (nonatomic, assign) BOOL isEnabled;
+@property (nonatomic, assign) BOOL isEnabled; // 🌟 专门控制视频流替换
 @property (nonatomic, assign) BOOL isHUDVisible; 
 @property (nonatomic, strong) AVStreamCoreProcessor *processor;
 @end
@@ -78,7 +77,7 @@ static NSString *g_fakeBSSID = nil;
 @end
 
 // ============================================================================
-// 【2. 异步视频去重洗稿引擎 (GPU零损耗 & 强制镜像注入)】
+// 【2. 异步视频去重洗稿引擎】
 // ============================================================================
 @interface AVStreamPreprocessor : NSObject
 + (void)processVideoAtURL:(NSURL *)sourceURL toDestination:(NSString *)destPath brightness:(CGFloat)brightness contrast:(CGFloat)contrast saturation:(CGFloat)saturation completion:(void(^)(BOOL success, NSError *error))completion;
@@ -92,8 +91,7 @@ static NSString *g_fakeBSSID = nil;
 
     AVMutableVideoComposition *videoComposition = [AVMutableVideoComposition videoCompositionWithAsset:asset applyingCIFiltersWithHandler:^(AVAsynchronousCIImageFilteringRequest * _Nonnull request) {
         if (brightness == 0.0 && contrast == 1.0 && saturation == 1.0) {
-            [request finishWithImage:request.sourceImage context:nil];
-            return;
+            [request finishWithImage:request.sourceImage context:nil]; return;
         }
         CIFilter *colorFilter = [CIFilter filterWithName:@"CIColorControls"];
         [colorFilter setValue:request.sourceImage forKey:kCIInputImageKey];
@@ -110,8 +108,7 @@ static NSString *g_fakeBSSID = nil;
     exportSession.shouldOptimizeForNetworkUse = YES; 
 
     NSMutableArray<AVMetadataItem *> *mirrorMetadata = [NSMutableArray array];
-    struct utsname systemInfo;
-    uname(&systemInfo);
+    struct utsname systemInfo; uname(&systemInfo);
     NSString *hardwareModel = [NSString stringWithCString:systemInfo.machine encoding:NSUTF8StringEncoding];
     UIDevice *currentDevice = [UIDevice currentDevice];
 
@@ -123,7 +120,6 @@ static NSString *g_fakeBSSID = nil;
 
     if (g_envSpoofingEnabled && g_fakeLat != 0.0) {
         AVMutableMetadataItem *locItem = [[AVMutableMetadataItem alloc] init]; locItem.keySpace = AVMetadataKeySpaceCommon; locItem.key = AVMetadataCommonKeyLocation;
-        // 写入 ISO 6709 标准位置数据到视频文件头
         locItem.value = [NSString stringWithFormat:@"%+08.4f%+09.4f/", g_fakeLat, g_fakeLon]; 
         [mirrorMetadata addObject:locItem];
     }
@@ -183,60 +179,40 @@ static NSString *g_fakeBSSID = nil;
 @implementation AVStreamCoreProcessor
 - (instancetype)init {
     if (self = [super init]) {
-        _decoderLock = [[NSLock alloc] init];
-        _lastPixelBuffer = NULL; 
+        _decoderLock = [[NSLock alloc] init]; _lastPixelBuffer = NULL; 
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_pixelTransferSession);
         if (_pixelTransferSession) VTSessionSetProperty(_pixelTransferSession, kVTPixelTransferPropertyKey_ScalingMode, kVTScalingMode_CropSourceToCleanAperture);
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleVideoChange:) name:@"AVSVideoDidChangeNotification" object:nil];
-    }
-    return self;
+    } return self;
 }
-
 - (void)loadVideo {
     NSString *docPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
     NSString *videoPath = [docPath stringByAppendingPathComponent:@"vcam_video.mp4"]; 
-    [self.decoderLock lock]; 
-    self.decoder = [[AVStreamDecoder alloc] initWithVideoPath:videoPath]; 
+    [self.decoderLock lock]; self.decoder = [[AVStreamDecoder alloc] initWithVideoPath:videoPath]; 
     if (_lastPixelBuffer) { CVPixelBufferRelease(_lastPixelBuffer); _lastPixelBuffer = NULL; }
     [self.decoderLock unlock];
 }
-
-- (void)handleVideoChange:(NSNotification *)note {
-    [self loadVideo];
-}
-
+- (void)handleVideoChange:(NSNotification *)note { [self loadVideo]; }
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer {
     if (![AVStreamManager sharedManager].isEnabled) return;
-    [self.decoderLock lock]; 
-    CVPixelBufferRef srcPix = [self.decoder copyNextPixelBuffer]; 
-    [self.decoderLock unlock];
-    
-    if (srcPix) {
-        if (_lastPixelBuffer) CVPixelBufferRelease(_lastPixelBuffer);
-        _lastPixelBuffer = CVPixelBufferRetain(srcPix);
-    } else {
-        if (_lastPixelBuffer) { srcPix = CVPixelBufferRetain(_lastPixelBuffer); }
-    }
-
-    if (srcPix) {
-        CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
+    [self.decoderLock lock]; CVPixelBufferRef srcPix = [self.decoder copyNextPixelBuffer]; [self.decoderLock unlock];
+    if (srcPix) { if (_lastPixelBuffer) CVPixelBufferRelease(_lastPixelBuffer); _lastPixelBuffer = CVPixelBufferRetain(srcPix);
+    } else { if (_lastPixelBuffer) srcPix = CVPixelBufferRetain(_lastPixelBuffer); }
+    if (srcPix) { CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (dstPix && self.pixelTransferSession) VTPixelTransferSessionTransferImage(self.pixelTransferSession, srcPix, dstPix);
         CVPixelBufferRelease(srcPix); 
     } else {
         CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (dstPix && CVPixelBufferLockBaseAddress(dstPix, 0) == kCVReturnSuccess) {
             size_t size = CVPixelBufferGetBytesPerRow(dstPix) * CVPixelBufferGetHeight(dstPix);
-            memset(CVPixelBufferGetBaseAddress(dstPix), 0, size);
-            CVPixelBufferUnlockBaseAddress(dstPix, 0);
+            memset(CVPixelBufferGetBaseAddress(dstPix), 0, size); CVPixelBufferUnlockBaseAddress(dstPix, 0);
         }
     }
 }
-
 - (void)processDepthBuffer:(AVDepthData *)depthData {
     if (!depthData) return; CVPixelBufferRef depthMap = [depthData depthDataMap]; if (!depthMap) return;
     if (CVPixelBufferLockBaseAddress(depthMap, 0) == kCVReturnSuccess) { void *baseAddress = CVPixelBufferGetBaseAddress(depthMap); if (baseAddress) { size_t size = CVPixelBufferGetBytesPerRow(depthMap) * CVPixelBufferGetHeight(depthMap); memset(baseAddress, 0, size); } CVPixelBufferUnlockBaseAddress(depthMap, 0); }
 }
-
 - (void)dealloc { 
     [[NSNotificationCenter defaultCenter] removeObserver:self]; 
     if (_pixelTransferSession) { VTPixelTransferSessionInvalidate(_pixelTransferSession); CFRelease(_pixelTransferSession); }
@@ -248,11 +224,19 @@ static NSString *g_fakeBSSID = nil;
 + (instancetype)sharedManager {
     static AVStreamManager *mgr = nil; static dispatch_once_t once;
     dispatch_once(&once, ^{ 
-        mgr = [[AVStreamManager alloc] init]; mgr.isEnabled = YES; mgr.isHUDVisible = NO; 
-        mgr.processor = [[AVStreamCoreProcessor alloc] init]; 
-        [mgr.processor loadVideo]; 
-    });
-    return mgr;
+        mgr = [[AVStreamManager alloc] init]; 
+        
+        // 🌟 独立控制：读取视频流专属开关缓存
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        if ([ud objectForKey:@"avs_video_enabled"] != nil) {
+            mgr.isEnabled = [ud boolForKey:@"avs_video_enabled"];
+        } else { 
+            mgr.isEnabled = YES; 
+        }
+        
+        mgr.isHUDVisible = NO; 
+        mgr.processor = [[AVStreamCoreProcessor alloc] init]; [mgr.processor loadVideo]; 
+    }); return mgr;
 }
 - (void)handleTwoFingerLongPress:(UIGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateRecognized || gesture.state == UIGestureRecognizerStateBegan) { 
@@ -274,23 +258,13 @@ static NSString *g_fakeBSSID = nil;
 + (instancetype)proxyWithTarget:(id)target { AVCameraSessionProxy *proxy = [AVCameraSessionProxy alloc]; proxy.target = target; return proxy; }
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [self.target methodSignatureForSelector:sel]; }
 - (void)forwardInvocation:(NSInvocation *)invocation { 
-    if (self.target && [self.target respondsToSelector:invocation.selector]) { [invocation invokeWithTarget:self.target]; }
-    else { void *nullPointer = NULL; [invocation setReturnValue:&nullPointer]; }
+    if (self.target && [self.target respondsToSelector:invocation.selector]) { [invocation invokeWithTarget:self.target]; } else { void *nullPointer = NULL; [invocation setReturnValue:&nullPointer]; }
 }
-
 - (BOOL)respondsToSelector:(SEL)aSelector {
-    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) || 
-        aSelector == @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:) || 
-        aSelector == @selector(captureOutput:didOutputMetadataObjects:fromConnection:) || 
-        aSelector == @selector(locationManager:didUpdateLocations:) ||
-        aSelector == @selector(locationManager:didUpdateToLocation:fromLocation:)) 
-        return YES;
+    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) || aSelector == @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:) || aSelector == @selector(captureOutput:didOutputMetadataObjects:fromConnection:) || aSelector == @selector(locationManager:didUpdateLocations:) || aSelector == @selector(locationManager:didUpdateToLocation:fromLocation:)) return YES;
     return [self.target respondsToSelector:aSelector];
 }
-- (Class)class { return [self.target class]; }
-- (Class)superclass { return [self.target superclass]; }
-- (BOOL)isKindOfClass:(Class)aClass { return [self.target isKindOfClass:aClass]; }
-- (BOOL)conformsToProtocol:(Protocol *)aProtocol { return [self.target conformsToProtocol:aProtocol]; }
+- (Class)class { return [self.target class]; } - (Class)superclass { return [self.target superclass]; } - (BOOL)isKindOfClass:(Class)aClass { return [self.target isKindOfClass:aClass]; } - (BOOL)conformsToProtocol:(Protocol *)aProtocol { return [self.target conformsToProtocol:aProtocol]; }
 
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
     @autoreleasepool { [[AVStreamManager sharedManager].processor processSampleBuffer:sampleBuffer]; if ([self.target respondsToSelector:_cmd]) [self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection]; }
@@ -307,17 +281,12 @@ static NSString *g_fakeBSSID = nil;
 - (void)captureOutput:(AVCaptureOutput *)output didOutputMetadataObjects:(NSArray *)metadataObjects fromConnection:(AVCaptureConnection *)connection {
     @autoreleasepool { NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:metadataObjects.count]; BOOL shouldFilter = ([AVStreamManager sharedManager].isEnabled && [AVStreamManager sharedManager].isHUDVisible); for (AVMetadataObject *obj in metadataObjects) { if (shouldFilter && [obj.type isEqualToString:AVMetadataObjectTypeFace]) continue; [filtered addObject:obj]; } if ([self.target respondsToSelector:_cmd]) [self.target captureOutput:output didOutputMetadataObjects:filtered fromConnection:connection]; }
 }
-
-- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
-    if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:locations];
-}
-- (void)locationManager:(CLLocationManager *)manager didUpdateToLocation:(CLLocation *)newLocation fromLocation:(CLLocation *)oldLocation {
-    if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateToLocation:newLocation fromLocation:oldLocation];
-}
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations { if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:locations]; }
+- (void)locationManager:(CLLocationManager *)manager didUpdateToLocation:(CLLocation *)newLocation fromLocation:(CLLocation *)oldLocation { if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateToLocation:newLocation fromLocation:oldLocation]; }
 @end
 
 // ============================================================================
-// 【5. HUD 控制面板 (极简单通道版)】
+// 【5. HUD 控制面板 (视频独立控制版)】
 // ============================================================================
 @implementation AVCaptureHUDWindow { 
     UILabel *_statusLabel; UISwitch *_powerSwitch; 
@@ -334,32 +303,29 @@ static NSString *g_fakeBSSID = nil;
 - (instancetype)initWithWindowScene:(UIWindowScene *)windowScene { if (self = [super initWithWindowScene:windowScene]) { [self commonInit]; } return self; }
 - (void)commonInit {
     self.windowLevel = UIWindowLevelStatusBar + 100; self.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85]; self.layer.cornerRadius = 16; self.layer.masksToBounds = YES; self.hidden = YES; 
-    [self setupUI]; UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]; [self addGestureRecognizer:pan];
+    [self setupUI]; 
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]; [self addGestureRecognizer:pan];
 }
 - (void)setupUI {
-    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 180, 20)]; _statusLabel.textColor = [UIColor greenColor]; _statusLabel.font = [UIFont boldSystemFontOfSize:14]; _statusLabel.text = @"🟢 V-Cam [精准定位版]"; [self addSubview:_statusLabel];
+    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 180, 20)]; _statusLabel.font = [UIFont boldSystemFontOfSize:14]; [self addSubview:_statusLabel];
     
-    _powerSwitch = [[UISwitch alloc] init]; _powerSwitch.transform = CGAffineTransformMakeScale(0.8, 0.8); _powerSwitch.frame = CGRectMake(230, 7, 50, 31); _powerSwitch.on = YES; [_powerSwitch addTarget:self action:@selector(togglePower:) forControlEvents:UIControlEventValueChanged]; [self addSubview:_powerSwitch];
+    _powerSwitch = [[UISwitch alloc] init]; _powerSwitch.transform = CGAffineTransformMakeScale(0.8, 0.8); _powerSwitch.frame = CGRectMake(230, 7, 50, 31); 
     
-    UIButton *importBtn = [UIButton buttonWithType:UIButtonTypeSystem]; 
-    importBtn.frame = CGRectMake(12, 45, 195, 44); 
-    importBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; 
-    importBtn.layer.cornerRadius = 8; 
-    [importBtn setTitle:@"📁 导入并替换视频" forState:UIControlStateNormal]; 
-    [importBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; 
-    importBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15]; 
-    [importBtn addTarget:self action:@selector(openVideoPicker) forControlEvents:UIControlEventTouchUpInside]; 
-    [self addSubview:importBtn];
+    // 🌟 独立读取视频专属状态
+    _powerSwitch.on = [AVStreamManager sharedManager].isEnabled;
+    if (_powerSwitch.on) { 
+        _statusLabel.text = @"🟢 视频替换 [工作态]"; 
+        _statusLabel.textColor = [UIColor greenColor]; 
+    } else { 
+        _statusLabel.text = @"🔴 视频替换 [直通态]"; 
+        _statusLabel.textColor = [UIColor redColor]; 
+    }
     
-    UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem]; 
-    clearBtn.frame = CGRectMake(215, 45, 63, 44); 
-    clearBtn.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:1.0]; 
-    clearBtn.layer.cornerRadius = 8; 
-    [clearBtn setTitle:@"隐藏" forState:UIControlStateNormal]; 
-    [clearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; 
-    clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14]; 
-    [clearBtn addTarget:self action:@selector(hideHUD) forControlEvents:UIControlEventTouchUpInside]; 
-    [self addSubview:clearBtn];
+    [_powerSwitch addTarget:self action:@selector(togglePower:) forControlEvents:UIControlEventValueChanged]; [self addSubview:_powerSwitch];
+    
+    UIButton *importBtn = [UIButton buttonWithType:UIButtonTypeSystem]; importBtn.frame = CGRectMake(12, 45, 195, 44); importBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; importBtn.layer.cornerRadius = 8; [importBtn setTitle:@"📁 导入并替换视频" forState:UIControlStateNormal]; [importBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; importBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15]; [importBtn addTarget:self action:@selector(openVideoPicker) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:importBtn];
+    
+    UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem]; clearBtn.frame = CGRectMake(215, 45, 63, 44); clearBtn.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:1.0]; clearBtn.layer.cornerRadius = 8; [clearBtn setTitle:@"隐藏" forState:UIControlStateNormal]; [clearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14]; [clearBtn addTarget:self action:@selector(hideHUD) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:clearBtn];
     
     UILabel *colorLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 110, 150, 20)]; colorLabel.text = @"🎨 防搬运滤镜重编码"; colorLabel.textColor = [UIColor whiteColor]; colorLabel.font = [UIFont boldSystemFontOfSize:14]; [self addSubview:colorLabel];
     _colorSwitch = [[UISwitch alloc] init]; _colorSwitch.transform = CGAffineTransformMakeScale(0.7, 0.7); _colorSwitch.frame = CGRectMake(235, 105, 50, 31); _colorSwitch.on = NO; [self addSubview:_colorSwitch];
@@ -375,7 +341,27 @@ static NSString *g_fakeBSSID = nil;
 }
 
 - (void)hideHUD { self.hidden = YES; [AVStreamManager sharedManager].isHUDVisible = NO; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
-- (void)togglePower:(UISwitch *)sender { [AVStreamManager sharedManager].isEnabled = sender.isOn; if (sender.isOn) { _statusLabel.text = @"🟢 V-Cam [精准定位版]"; _statusLabel.textColor = [UIColor greenColor]; } else { _statusLabel.text = @"🔴 已禁用"; _statusLabel.textColor = [UIColor redColor]; } UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
+
+- (void)togglePower:(UISwitch *)sender { 
+    // 🌟 独立控制：只控制视频状态，不干涉底层 GPS/Wi-Fi ！
+    [AVStreamManager sharedManager].isEnabled = sender.isOn; 
+    
+    // 独立缓存视频开关
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setBool:sender.isOn forKey:@"avs_video_enabled"];
+    [ud synchronize];
+    
+    if (sender.isOn) { 
+        _statusLabel.text = @"🟢 视频替换 [工作态]"; 
+        _statusLabel.textColor = [UIColor greenColor]; 
+    } else { 
+        _statusLabel.text = @"🔴 视频替换 [直通态]"; 
+        _statusLabel.textColor = [UIColor redColor]; 
+    } 
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; 
+    [feedback impactOccurred]; 
+}
+
 - (void)handlePan:(UIPanGestureRecognizer *)pan { CGPoint trans = [pan translationInView:self]; self.center = CGPointMake(self.center.x + trans.x, self.center.y + trans.y); [pan setTranslation:CGPointZero inView:self]; }
 
 - (void)openVideoPicker {
@@ -396,7 +382,8 @@ static NSString *g_fakeBSSID = nil;
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{ 
             [AVStreamPreprocessor processVideoAtURL:url toDestination:dest brightness:bVal contrast:cVal saturation:sVal completion:^(BOOL success, NSError *error) {
                 dispatch_async(dispatch_get_main_queue(), ^{ 
-                    if (success) { [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSVideoDidChangeNotification" object:nil]; self->_statusLabel.text = @"🟢 V-Cam [替换就绪]"; self->_statusLabel.textColor = [UIColor greenColor];
+                    if (success) { [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSVideoDidChangeNotification" object:nil]; 
+                        self->_statusLabel.text = @"🟢 视频替换 [工作态]"; self->_statusLabel.textColor = [UIColor greenColor];
                     } else { self->_statusLabel.text = @"❌ 洗稿失败"; self->_statusLabel.textColor = [UIColor redColor]; } 
                 });
             }];
@@ -407,15 +394,13 @@ static NSString *g_fakeBSSID = nil;
 @end
 
 // ============================================================================
-// 【6. 环境配置窗口】
+// 【6. 环境配置窗口 (环境专属独立控制)】
 // ============================================================================
 @implementation AVCaptureMapWindow { 
     MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; 
     double _pendingLat; double _pendingLon;
     NSString *_pMCC; NSString *_pMNC; NSString *_pCarrier; NSString *_pTZ; NSString *_pLocale;
-    NSString *_pISO; 
-    // 🌟 终极防御 (Wi-Fi 伪装): 声明实例变量保存 Wi-Fi 指纹
-    NSString *_pSSID; NSString *_pBSSID;
+    NSString *_pISO; NSString *_pSSID; NSString *_pBSSID;
 }
 + (instancetype)sharedMap { static AVCaptureMapWindow *map = nil; static dispatch_once_t once; dispatch_once(&once, ^{ map = [[AVCaptureMapWindow alloc] initWithFrame:CGRectMake(10, 100, 310, 480)]; }); return map; }
 - (instancetype)initWithFrame:(CGRect)f { if (self = [super initWithFrame:f]) { self.windowLevel = UIWindowLevelStatusBar + 110; self.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.98]; self.layer.cornerRadius = 16; self.layer.masksToBounds = YES; self.hidden = YES; self.userInteractionEnabled = YES; UIViewController *root = [[UIViewController alloc] init]; root.view.frame = self.bounds; root.view.userInteractionEnabled = YES; self.rootViewController = root; [self setupUI]; UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]; pan.delegate = self; [self addGestureRecognizer:pan]; } return self; }
@@ -428,55 +413,36 @@ static NSString *g_fakeBSSID = nil;
     _pendingLat = g_fakeLat != 0.0 ? g_fakeLat : 50.1109; _pendingLon = g_fakeLon != 0.0 ? g_fakeLon : 8.6821; 
     _pMCC = g_fakeMCC ?: @"262"; _pMNC = g_fakeMNC ?: @"01"; _pCarrier = g_fakeCarrierName ?: @"Telekom.de"; 
     _pTZ = g_fakeTZ ?: @"Europe/Berlin"; _pLocale = g_fakeLocale ?: @"de_DE";
-    _pISO = g_fakeISO ?: @"de"; 
-    // 🌟 终极防御 (Wi-Fi 伪装): 初始化
-    _pSSID = g_fakeSSID ?: @"FritzBox-7590"; _pBSSID = g_fakeBSSID ?: @"c4:9f:4c:11:2b:7a";
+    _pISO = g_fakeISO ?: @"de"; _pSSID = g_fakeSSID ?: @"FritzBox-7590"; _pBSSID = g_fakeBSSID ?: @"c4:9f:4c:11:2b:7a";
     
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 15, 200, 20)]; title.text = @"🌍 环境伪装配置"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16]; [container addSubview:title];
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 15, 200, 20)]; title.text = @"🌍 环境硬件伪装引擎"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16]; [container addSubview:title];
+    
+    // 🌟 环境专属开关
     _envSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(245, 10, 50, 30)]; _envSwitch.on = g_envSpoofingEnabled; [container addSubview:_envSwitch];
+    
     _mapView = [[MKMapView alloc] initWithFrame:CGRectMake(12, 50, 286, 250)]; _mapView.layer.cornerRadius = 8; _mapView.delegate = self; _mapView.userInteractionEnabled = YES; 
     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(dropPin:)]; lp.minimumPressDuration = 0.5; [_mapView addGestureRecognizer:lp]; [container addSubview:_mapView];
     _infoLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 310, 286, 60)]; _infoLabel.numberOfLines = 3; _infoLabel.textColor = [UIColor greenColor]; _infoLabel.font = [UIFont systemFontOfSize:11]; _infoLabel.textAlignment = NSTextAlignmentCenter; [self updateLabel]; [container addSubview:_infoLabel];
-    UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem]; save.frame = CGRectMake(12, 385, 286, 44); save.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; save.layer.cornerRadius = 8; [save setTitle:@"保存配置并热更新" forState:UIControlStateNormal]; [save setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; [save addTarget:self action:@selector(saveAndClose) forControlEvents:UIControlEventTouchUpInside]; [container addSubview:save];
+    UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem]; save.frame = CGRectMake(12, 385, 286, 44); save.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; save.layer.cornerRadius = 8; [save setTitle:@"保存环境并热更新" forState:UIControlStateNormal]; [save setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; [save addTarget:self action:@selector(saveAndClose) forControlEvents:UIControlEventTouchUpInside]; [container addSubview:save];
     [_mapView setRegion:MKCoordinateRegionMake(CLLocationCoordinate2DMake(_pendingLat, _pendingLon), MKCoordinateSpanMake(5, 5)) animated:NO];
 }
 - (void)updateLabel { _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n运营商: %@ (%@-%@)\n时区: %@ | Wi-Fi: %@", _pendingLat, _pendingLon, _pCarrier?:@"-", _pMCC?:@"-", _pMNC?:@"-", _pTZ?:@"-", _pSSID?:@"-"]; }
 
 - (void)setFakeCountry:(NSString *)cc {
-    // 🌟 终极防御 (Wi-Fi 伪装): 动态绑定国家专属真实 SSID 和 OUI
-    self->_pMCC = @"262"; self->_pMNC = @"01"; self->_pCarrier = @"Telekom.de"; self->_pTZ = @"Europe/Berlin"; self->_pLocale = @"de_DE"; self->_pISO = @"de"; 
-    self->_pSSID = @"FritzBox-7590"; self->_pBSSID = @"c4:9f:4c:11:2b:7a"; // 德国路由器
-
-    if ([cc isEqualToString:@"us"]) { 
-        self->_pMCC = @"310"; self->_pMNC = @"410"; self->_pCarrier = @"AT&T"; self->_pTZ = @"America/New_York"; self->_pLocale = @"en_US"; self->_pISO = @"us"; 
-        self->_pSSID = @"AT&T-WIFI-5G"; self->_pBSSID = @"00:1c:10:a5:b1:22"; // 美国 Cisco OUI
-    }
-    else if ([cc isEqualToString:@"fr"]) { 
-        self->_pMCC = @"208"; self->_pMNC = @"01"; self->_pCarrier = @"Orange F"; self->_pTZ = @"Europe/Paris"; self->_pLocale = @"fr_FR"; self->_pISO = @"fr"; 
-        self->_pSSID = @"Livebox-9a2c"; self->_pBSSID = @"e4:9e:12:44:1a:0b"; // 法国 Orange
-    }
-    else if ([cc isEqualToString:@"it"]) { 
-        self->_pMCC = @"222"; self->_pMNC = @"01"; self->_pCarrier = @"TIM"; self->_pTZ = @"Europe/Rome"; self->_pLocale = @"it_IT"; self->_pISO = @"it"; 
-        self->_pSSID = @"TIM-Fibra"; self->_pBSSID = @"a0:1b:29:f1:4c:88"; // 意大利 TIM
-    }
-    else if ([cc isEqualToString:@"gb"]) { 
-        self->_pMCC = @"234"; self->_pMNC = @"15"; self->_pCarrier = @"Vodafone UK"; self->_pTZ = @"Europe/London"; self->_pLocale = @"en_GB"; self->_pISO = @"gb"; 
-        self->_pSSID = @"BT-Hub6-2X9P"; self->_pBSSID = @"00:1e:8c:11:22:33"; // 英国 BT
-    }
+    self->_pMCC = @"262"; self->_pMNC = @"01"; self->_pCarrier = @"Telekom.de"; self->_pTZ = @"Europe/Berlin"; self->_pLocale = @"de_DE"; self->_pISO = @"de"; self->_pSSID = @"FritzBox-7590"; self->_pBSSID = @"c4:9f:4c:11:2b:7a";
+    if ([cc isEqualToString:@"us"]) { self->_pMCC = @"310"; self->_pMNC = @"410"; self->_pCarrier = @"AT&T"; self->_pTZ = @"America/New_York"; self->_pLocale = @"en_US"; self->_pISO = @"us"; self->_pSSID = @"AT&T-WIFI-5G"; self->_pBSSID = @"00:1c:10:a5:b1:22"; }
+    else if ([cc isEqualToString:@"fr"]) { self->_pMCC = @"208"; self->_pMNC = @"01"; self->_pCarrier = @"Orange F"; self->_pTZ = @"Europe/Paris"; self->_pLocale = @"fr_FR"; self->_pISO = @"fr"; self->_pSSID = @"Livebox-9a2c"; self->_pBSSID = @"e4:9e:12:44:1a:0b"; }
+    else if ([cc isEqualToString:@"it"]) { self->_pMCC = @"222"; self->_pMNC = @"01"; self->_pCarrier = @"TIM"; self->_pTZ = @"Europe/Rome"; self->_pLocale = @"it_IT"; self->_pISO = @"it"; self->_pSSID = @"TIM-Fibra"; self->_pBSSID = @"a0:1b:29:f1:4c:88"; }
+    else if ([cc isEqualToString:@"gb"]) { self->_pMCC = @"234"; self->_pMNC = @"15"; self->_pCarrier = @"Vodafone UK"; self->_pTZ = @"Europe/London"; self->_pLocale = @"en_GB"; self->_pISO = @"gb"; self->_pSSID = @"BT-Hub6-2X9P"; self->_pBSSID = @"00:1e:8c:11:22:33"; }
 }
 
 - (void)dropPin:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
-    CGPoint p = [g locationInView:_mapView];
-    CLLocationCoordinate2D c = [_mapView convertPoint:p toCoordinateFromView:_mapView];
-    [_mapView removeAnnotations:_mapView.annotations];
-    MKPointAnnotation *ann = [[MKPointAnnotation alloc] init]; ann.coordinate = c; [_mapView addAnnotation:ann];
+    CGPoint p = [g locationInView:_mapView]; CLLocationCoordinate2D c = [_mapView convertPoint:p toCoordinateFromView:_mapView];
+    [_mapView removeAnnotations:_mapView.annotations]; MKPointAnnotation *ann = [[MKPointAnnotation alloc] init]; ann.coordinate = c; [_mapView addAnnotation:ann];
     _pendingLat = c.latitude; _pendingLon = c.longitude;
-    
-    double jLat = (arc4random_uniform(200) - 100) / 10000000.0; 
-    double jLon = (arc4random_uniform(200) - 100) / 10000000.0;
+    double jLat = (arc4random_uniform(200) - 100) / 10000000.0; double jLon = (arc4random_uniform(200) - 100) / 10000000.0;
     g_driftLat = jLat; g_driftLon = jLon;
-
     _infoLabel.text = @"⏳ 正在解析该国家基站与时区..."; _infoLabel.textColor = [UIColor orangeColor];
     CLGeocoder *geo = [[CLGeocoder alloc] init];
     [geo reverseGeocodeLocation:[[CLLocation alloc] initWithLatitude:c.latitude longitude:c.longitude] completionHandler:^(NSArray *pls, NSError *err) {
@@ -492,32 +458,14 @@ static NSString *g_fakeBSSID = nil;
 
 - (void)saveAndClose {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults]; [ud setBool:_envSwitch.on forKey:@"avs_env_enabled"]; [ud setDouble:_pendingLat forKey:@"avs_env_lat"]; [ud setDouble:_pendingLon forKey:@"avs_env_lon"];
-    if (_pMCC) [ud setObject:_pMCC forKey:@"avs_env_mcc"]; 
-    if (_pMNC) [ud setObject:_pMNC forKey:@"avs_env_mnc"]; 
-    if (_pCarrier) [ud setObject:_pCarrier forKey:@"avs_env_carrier"]; 
-    if (_pTZ) [ud setObject:_pTZ forKey:@"avs_env_tz"]; 
-    if (_pLocale) [ud setObject:_pLocale forKey:@"avs_env_locale"]; 
-    if (_pISO) [ud setObject:_pISO forKey:@"avs_env_iso"]; 
-    
-    // 🌟 终极防御 (Wi-Fi 伪装): 持久化
-    if (_pSSID) [ud setObject:_pSSID forKey:@"avs_env_ssid"];
-    if (_pBSSID) [ud setObject:_pBSSID forKey:@"avs_env_bssid"];
-    
+    if (_pMCC) [ud setObject:_pMCC forKey:@"avs_env_mcc"]; if (_pMNC) [ud setObject:_pMNC forKey:@"avs_env_mnc"]; if (_pCarrier) [ud setObject:_pCarrier forKey:@"avs_env_carrier"]; if (_pTZ) [ud setObject:_pTZ forKey:@"avs_env_tz"]; if (_pLocale) [ud setObject:_pLocale forKey:@"avs_env_locale"]; if (_pISO) [ud setObject:_pISO forKey:@"avs_env_iso"]; if (_pSSID) [ud setObject:_pSSID forKey:@"avs_env_ssid"]; if (_pBSSID) [ud setObject:_pBSSID forKey:@"avs_env_bssid"];
     [ud synchronize];
     
+    // 🌟 独立控制：只干涉底层物理环境！完全不干涉视频流状态
     g_envSpoofingEnabled = _envSwitch.on; g_fakeLat = _pendingLat; g_fakeLon = _pendingLon; 
-    if (_pMCC) g_fakeMCC = _pMCC; 
-    if (_pMNC) g_fakeMNC = _pMNC; 
-    if (_pCarrier) g_fakeCarrierName = _pCarrier; 
-    if (_pTZ) g_fakeTZ = _pTZ; 
-    if (_pLocale) g_fakeLocale = _pLocale;
-    if (_pISO) g_fakeISO = _pISO; 
+    if (_pMCC) g_fakeMCC = _pMCC; if (_pMNC) g_fakeMNC = _pMNC; if (_pCarrier) g_fakeCarrierName = _pCarrier; if (_pTZ) g_fakeTZ = _pTZ; if (_pLocale) g_fakeLocale = _pLocale; if (_pISO) g_fakeISO = _pISO; if (_pSSID) g_fakeSSID = _pSSID; if (_pBSSID) g_fakeBSSID = _pBSSID;
     
-    // 🌟 终极防御 (Wi-Fi 伪装): 热更新
-    if (_pSSID) g_fakeSSID = _pSSID;
-    if (_pBSSID) g_fakeBSSID = _pBSSID;
-    
-    [self makeKeyWindow]; UIAlertController *a = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"全系统级定位伪装已更新！" preferredStyle:UIAlertControllerStyleAlert]; [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(id x){ self.hidden = YES; }]]; [self.rootViewController presentViewController:a animated:YES completion:nil];
+    [self makeKeyWindow]; UIAlertController *a = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"系统级环境伪装已独立更新！" preferredStyle:UIAlertControllerStyleAlert]; [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(id x){ self.hidden = YES; }]]; [self.rootViewController presentViewController:a animated:YES completion:nil];
 }
 - (void)handlePan:(UIPanGestureRecognizer *)p { CGPoint t = [p translationInView:self]; self.center = CGPointMake(self.center.x+t.x, self.center.y+t.y); [p setTranslation:CGPointZero inView:self]; }
 @end
@@ -555,8 +503,6 @@ static NSString *g_fakeBSSID = nil;
 @interface AVCaptureMetadataOutput (AVStreamHook)
 - (void)avs_setMetadataObjectsDelegate:(id)delegate queue:(dispatch_queue_t)queue;
 @end
-
-// 🌟 终极防御 (Wi-Fi 伪装): 声明 NEHotspotNetwork
 @interface NEHotspotNetwork (AVStreamHook)
 + (void)avs_fetchCurrentWithCompletionHandler:(void (^)(NEHotspotNetwork * _Nullable currentNetwork))completionHandler;
 - (NSString *)avs_SSID;
@@ -567,7 +513,6 @@ static NSString *g_fakeBSSID = nil;
 // 【7. 系统底层 Hook 实现 (含 Fishhook C 函数接管)】
 // ============================================================================
 
-// 🌟 终极防御 (Wi-Fi 伪装): 底层 C 函数劫持逻辑 (CNCopyCurrentNetworkInfo)
 static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName);
 CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
     if (g_envSpoofingEnabled && g_fakeSSID && g_fakeBSSID) {
@@ -576,14 +521,12 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
             (id)kCNNetworkInfoKeyBSSID: g_fakeBSSID,
             (id)kCNNetworkInfoKeySSIDData: [g_fakeSSID dataUsingEncoding:NSUTF8StringEncoding]
         };
-        // 注意：底层 C 函数需要遵循 CoreFoundation 的内存管理，必须使用 CFBridgingRetain
         return CFBridgingRetain(fakeNetworkInfo);
     }
     if (orig_CNCopyCurrentNetworkInfo) { return orig_CNCopyCurrentNetworkInfo(interfaceName); }
     return NULL;
 }
 
-// 🌟 终极防御 (Wi-Fi 伪装): 现代 iOS 14+ 网络接口劫持逻辑
 @implementation NEHotspotNetwork (AVStreamHook)
 + (void)avs_fetchCurrentWithCompletionHandler:(void (^)(NEHotspotNetwork * _Nullable currentNetwork))completionHandler {
     if (g_envSpoofingEnabled && g_fakeSSID) {
@@ -592,16 +535,9 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         }];
     } else { [self avs_fetchCurrentWithCompletionHandler:completionHandler]; }
 }
-- (NSString *)avs_SSID {
-    if (g_envSpoofingEnabled && g_fakeSSID) return g_fakeSSID;
-    return [self avs_SSID];
-}
-- (NSString *)avs_BSSID {
-    if (g_envSpoofingEnabled && g_fakeBSSID) return g_fakeBSSID;
-    return [self avs_BSSID];
-}
+- (NSString *)avs_SSID { if (g_envSpoofingEnabled && g_fakeSSID) return g_fakeSSID; return [self avs_SSID]; }
+- (NSString *)avs_BSSID { if (g_envSpoofingEnabled && g_fakeBSSID) return g_fakeBSSID; return [self avs_BSSID]; }
 @end
-
 
 @implementation CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName { return g_envSpoofingEnabled && g_fakeCarrierName ? g_fakeCarrierName : [self avs_carrierName]; }
@@ -719,6 +655,8 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
 @implementation AVStreamLoader
 + (void)load {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    
+    // 🌟 独立读取环境开关
     if ([defaults objectForKey:@"avs_env_enabled"] != nil) {
         g_envSpoofingEnabled = [defaults boolForKey:@"avs_env_enabled"];
         g_fakeLat = [defaults doubleForKey:@"avs_env_lat"];
@@ -729,7 +667,6 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         g_fakeCarrierName = [defaults stringForKey:@"avs_env_carrier"] ?: @"Telekom.de";
         g_fakeTZ = [defaults stringForKey:@"avs_env_tz"] ?: @"Europe/Berlin";
         g_fakeLocale = [defaults stringForKey:@"avs_env_locale"] ?: @"de_DE";
-        // 🌟 终极防御 (Wi-Fi 伪装): 读取缓存
         g_fakeSSID = [defaults stringForKey:@"avs_env_ssid"] ?: @"FritzBox-7590";
         g_fakeBSSID = [defaults stringForKey:@"avs_env_bssid"] ?: @"c4:9f:4c:11:2b:7a";
     } else { g_envSpoofingEnabled = NO; }
@@ -782,7 +719,6 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         method_exchangeImplementations(class_getClassMethod(loclClass, @selector(preferredLanguages)), class_getClassMethod(loclClass, @selector(avs_preferredLanguages)));
     }
 
-    // 🌟 终极防御 (Wi-Fi 伪装): Hook iOS 14+ 网络接口 (Obj-C 层面)
     Class neClass = NSClassFromString(@"NEHotspotNetwork");
     if (neClass) {
         method_exchangeImplementations(class_getClassMethod(neClass, @selector(fetchCurrentWithCompletionHandler:)), class_getClassMethod(neClass, @selector(avs_fetchCurrentWithCompletionHandler:)));
@@ -790,9 +726,6 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         method_exchangeImplementations(class_getInstanceMethod(neClass, @selector(BSSID)), class_getInstanceMethod(neClass, @selector(avs_BSSID)));
     }
 
-    // =========================================================
-    // 🌟 Fishhook 整合: 执行底层 C 函数替换 (Fishhook 免越狱重绑定)
-    // =========================================================
     struct rebinding cn_rebinding = {
         "CNCopyCurrentNetworkInfo", 
         (void *)my_CNCopyCurrentNetworkInfo, 
