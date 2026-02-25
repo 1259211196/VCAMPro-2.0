@@ -2,7 +2,7 @@ Package: com.vcam.pro
 Name: VCAM-Pro
 Depends: mobilesubstrate
 Version: 2.0.0
-Architecture: arm64 arm64e
+Architecture: iphoneos-arm
 Description: Advanced Virtual Camera & Preprocessor
 Maintainer: VCAM-Dev
 Author: VCAM-Dev
