@@ -13,6 +13,13 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
+// 🌟 终极防御 (Wi-Fi 伪装): 引入网络层核心头文件
+#import <SystemConfiguration/CaptiveNetwork.h>
+#import <NetworkExtension/NetworkExtension.h>
+
+// 🌟 Fishhook 整合: 引入免越狱 C 函数符号重绑定库
+#import "fishhook.h"
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
 #pragma clang diagnostic ignored "-Wavailability"
@@ -34,6 +41,10 @@ static NSString *g_fakeISO = nil;
 static NSString *g_fakeCarrierName = nil;
 static NSString *g_fakeTZ = nil;
 static NSString *g_fakeLocale = nil;
+
+// 🌟 终极防御 (Wi-Fi 伪装): 静态缓存
+static NSString *g_fakeSSID = nil;
+static NSString *g_fakeBSSID = nil;
 
 // ============================================================================
 // 【1. 伪装系统大管家】
@@ -392,7 +403,9 @@ static NSString *g_fakeLocale = nil;
     MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; 
     double _pendingLat; double _pendingLon;
     NSString *_pMCC; NSString *_pMNC; NSString *_pCarrier; NSString *_pTZ; NSString *_pLocale;
-    NSString *_pISO; // 🌟 修复 1: 新增 ISO 国家代码缓存变量
+    NSString *_pISO; 
+    // 🌟 终极防御 (Wi-Fi 伪装): 声明实例变量保存 Wi-Fi 指纹
+    NSString *_pSSID; NSString *_pBSSID;
 }
 + (instancetype)sharedMap { static AVCaptureMapWindow *map = nil; static dispatch_once_t once; dispatch_once(&once, ^{ map = [[AVCaptureMapWindow alloc] initWithFrame:CGRectMake(10, 100, 310, 480)]; }); return map; }
 - (instancetype)initWithFrame:(CGRect)f { if (self = [super initWithFrame:f]) { self.windowLevel = UIWindowLevelStatusBar + 110; self.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.98]; self.layer.cornerRadius = 16; self.layer.masksToBounds = YES; self.hidden = YES; self.userInteractionEnabled = YES; UIViewController *root = [[UIViewController alloc] init]; root.view.frame = self.bounds; root.view.userInteractionEnabled = YES; self.rootViewController = root; [self setupUI]; UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]; pan.delegate = self; [self addGestureRecognizer:pan]; } return self; }
@@ -405,7 +418,9 @@ static NSString *g_fakeLocale = nil;
     _pendingLat = g_fakeLat != 0.0 ? g_fakeLat : 50.1109; _pendingLon = g_fakeLon != 0.0 ? g_fakeLon : 8.6821; 
     _pMCC = g_fakeMCC ?: @"262"; _pMNC = g_fakeMNC ?: @"01"; _pCarrier = g_fakeCarrierName ?: @"Telekom.de"; 
     _pTZ = g_fakeTZ ?: @"Europe/Berlin"; _pLocale = g_fakeLocale ?: @"de_DE";
-    _pISO = g_fakeISO ?: @"de"; // 🌟 修复: 初始化 _pISO
+    _pISO = g_fakeISO ?: @"de"; 
+    // 🌟 终极防御 (Wi-Fi 伪装): 初始化
+    _pSSID = g_fakeSSID ?: @"FritzBox-7590"; _pBSSID = g_fakeBSSID ?: @"c4:9f:4c:11:2b:7a";
     
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 15, 200, 20)]; title.text = @"🌍 环境伪装配置"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16]; [container addSubview:title];
     _envSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(245, 10, 50, 30)]; _envSwitch.on = g_envSpoofingEnabled; [container addSubview:_envSwitch];
@@ -415,15 +430,31 @@ static NSString *g_fakeLocale = nil;
     UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem]; save.frame = CGRectMake(12, 385, 286, 44); save.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; save.layer.cornerRadius = 8; [save setTitle:@"保存配置并热更新" forState:UIControlStateNormal]; [save setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; [save addTarget:self action:@selector(saveAndClose) forControlEvents:UIControlEventTouchUpInside]; [container addSubview:save];
     [_mapView setRegion:MKCoordinateRegionMake(CLLocationCoordinate2DMake(_pendingLat, _pendingLon), MKCoordinateSpanMake(5, 5)) animated:NO];
 }
-- (void)updateLabel { _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n运营商: %@ (%@-%@)\n时区: %@ | 语言: %@", _pendingLat, _pendingLon, _pCarrier?:@"-", _pMCC?:@"-", _pMNC?:@"-", _pTZ?:@"-", _pLocale?:@"-"]; }
+- (void)updateLabel { _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n运营商: %@ (%@-%@)\n时区: %@ | Wi-Fi: %@", _pendingLat, _pendingLon, _pCarrier?:@"-", _pMCC?:@"-", _pMNC?:@"-", _pTZ?:@"-", _pSSID?:@"-"]; }
+
 - (void)setFakeCountry:(NSString *)cc {
-    // 🌟 修复 2: 在切换国家时一并更新 _pISO
+    // 🌟 终极防御 (Wi-Fi 伪装): 动态绑定国家专属真实 SSID 和 OUI
     self->_pMCC = @"262"; self->_pMNC = @"01"; self->_pCarrier = @"Telekom.de"; self->_pTZ = @"Europe/Berlin"; self->_pLocale = @"de_DE"; self->_pISO = @"de"; 
-    if ([cc isEqualToString:@"us"]) { self->_pMCC = @"310"; self->_pMNC = @"410"; self->_pCarrier = @"AT&T"; self->_pTZ = @"America/New_York"; self->_pLocale = @"en_US"; self->_pISO = @"us"; }
-    else if ([cc isEqualToString:@"fr"]) { self->_pMCC = @"208"; self->_pMNC = @"01"; self->_pCarrier = @"Orange F"; self->_pTZ = @"Europe/Paris"; self->_pLocale = @"fr_FR"; self->_pISO = @"fr"; }
-    else if ([cc isEqualToString:@"it"]) { self->_pMCC = @"222"; self->_pMNC = @"01"; self->_pCarrier = @"TIM"; self->_pTZ = @"Europe/Rome"; self->_pLocale = @"it_IT"; self->_pISO = @"it"; }
-    else if ([cc isEqualToString:@"gb"]) { self->_pMCC = @"234"; self->_pMNC = @"15"; self->_pCarrier = @"Vodafone UK"; self->_pTZ = @"Europe/London"; self->_pLocale = @"en_GB"; self->_pISO = @"gb"; }
+    self->_pSSID = @"FritzBox-7590"; self->_pBSSID = @"c4:9f:4c:11:2b:7a"; // 德国路由器
+
+    if ([cc isEqualToString:@"us"]) { 
+        self->_pMCC = @"310"; self->_pMNC = @"410"; self->_pCarrier = @"AT&T"; self->_pTZ = @"America/New_York"; self->_pLocale = @"en_US"; self->_pISO = @"us"; 
+        self->_pSSID = @"AT&T-WIFI-5G"; self->_pBSSID = @"00:1c:10:a5:b1:22"; // 美国 Cisco OUI
+    }
+    else if ([cc isEqualToString:@"fr"]) { 
+        self->_pMCC = @"208"; self->_pMNC = @"01"; self->_pCarrier = @"Orange F"; self->_pTZ = @"Europe/Paris"; self->_pLocale = @"fr_FR"; self->_pISO = @"fr"; 
+        self->_pSSID = @"Livebox-9a2c"; self->_pBSSID = @"e4:9e:12:44:1a:0b"; // 法国 Orange
+    }
+    else if ([cc isEqualToString:@"it"]) { 
+        self->_pMCC = @"222"; self->_pMNC = @"01"; self->_pCarrier = @"TIM"; self->_pTZ = @"Europe/Rome"; self->_pLocale = @"it_IT"; self->_pISO = @"it"; 
+        self->_pSSID = @"TIM-Fibra"; self->_pBSSID = @"a0:1b:29:f1:4c:88"; // 意大利 TIM
+    }
+    else if ([cc isEqualToString:@"gb"]) { 
+        self->_pMCC = @"234"; self->_pMNC = @"15"; self->_pCarrier = @"Vodafone UK"; self->_pTZ = @"Europe/London"; self->_pLocale = @"en_GB"; self->_pISO = @"gb"; 
+        self->_pSSID = @"BT-Hub6-2X9P"; self->_pBSSID = @"00:1e:8c:11:22:33"; // 英国 BT
+    }
 }
+
 - (void)dropPin:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
     CGPoint p = [g locationInView:_mapView];
@@ -448,6 +479,7 @@ static NSString *g_fakeLocale = nil;
         });
     }];
 }
+
 - (void)saveAndClose {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults]; [ud setBool:_envSwitch.on forKey:@"avs_env_enabled"]; [ud setDouble:_pendingLat forKey:@"avs_env_lat"]; [ud setDouble:_pendingLon forKey:@"avs_env_lon"];
     if (_pMCC) [ud setObject:_pMCC forKey:@"avs_env_mcc"]; 
@@ -455,7 +487,11 @@ static NSString *g_fakeLocale = nil;
     if (_pCarrier) [ud setObject:_pCarrier forKey:@"avs_env_carrier"]; 
     if (_pTZ) [ud setObject:_pTZ forKey:@"avs_env_tz"]; 
     if (_pLocale) [ud setObject:_pLocale forKey:@"avs_env_locale"]; 
-    if (_pISO) [ud setObject:_pISO forKey:@"avs_env_iso"]; // 🌟 修复 3: 保存 ISO 配置到磁盘
+    if (_pISO) [ud setObject:_pISO forKey:@"avs_env_iso"]; 
+    
+    // 🌟 终极防御 (Wi-Fi 伪装): 持久化
+    if (_pSSID) [ud setObject:_pSSID forKey:@"avs_env_ssid"];
+    if (_pBSSID) [ud setObject:_pBSSID forKey:@"avs_env_bssid"];
     
     [ud synchronize];
     
@@ -465,7 +501,11 @@ static NSString *g_fakeLocale = nil;
     if (_pCarrier) g_fakeCarrierName = _pCarrier; 
     if (_pTZ) g_fakeTZ = _pTZ; 
     if (_pLocale) g_fakeLocale = _pLocale;
-    if (_pISO) g_fakeISO = _pISO; // 🌟 修复 3: 热更新 ISO 内存缓存
+    if (_pISO) g_fakeISO = _pISO; 
+    
+    // 🌟 终极防御 (Wi-Fi 伪装): 热更新
+    if (_pSSID) g_fakeSSID = _pSSID;
+    if (_pBSSID) g_fakeBSSID = _pBSSID;
     
     [self makeKeyWindow]; UIAlertController *a = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"全系统级定位伪装已更新！" preferredStyle:UIAlertControllerStyleAlert]; [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(id x){ self.hidden = YES; }]]; [self.rootViewController presentViewController:a animated:YES completion:nil];
 }
@@ -476,42 +516,25 @@ static NSString *g_fakeLocale = nil;
 // 【提前声明所有系统接口】
 // ============================================================================
 @interface CTCarrier (AVStreamHook)
-- (NSString *)avs_carrierName;
-- (NSString *)avs_isoCountryCode;
-- (NSString *)avs_mobileCountryCode;
-- (NSString *)avs_mobileNetworkCode;
+- (NSString *)avs_carrierName; - (NSString *)avs_isoCountryCode; - (NSString *)avs_mobileCountryCode; - (NSString *)avs_mobileNetworkCode;
 @end
 @interface CTTelephonyNetworkInfo (AVStreamHook)
 - (NSDictionary<NSString *,CTCarrier *> *)avs_serviceSubscriberCellularProviders;
 @end
 @interface CLLocationManager (AVStreamHook)
-- (CLLocation *)avs_location;
-- (void)avs_setDelegate:(id<CLLocationManagerDelegate>)delegate;
-- (void)avs_startUpdatingLocation;
-- (void)avs_requestLocation;
+- (CLLocation *)avs_location; - (void)avs_setDelegate:(id<CLLocationManagerDelegate>)delegate; - (void)avs_startUpdatingLocation; - (void)avs_requestLocation;
 @end
 @interface CLLocation (AVStreamHook)
-- (CLLocationCoordinate2D)avs_coordinate;
-- (CLLocationDistance)avs_altitude;
-- (CLLocationAccuracy)avs_horizontalAccuracy;
-- (CLLocationAccuracy)avs_verticalAccuracy;
-- (CLLocationSpeed)avs_speed;
-- (CLLocationDirection)avs_course;
+- (CLLocationCoordinate2D)avs_coordinate; - (CLLocationDistance)avs_altitude; - (CLLocationAccuracy)avs_horizontalAccuracy; - (CLLocationAccuracy)avs_verticalAccuracy; - (CLLocationSpeed)avs_speed; - (CLLocationDirection)avs_course;
 @end
 @interface NSTimeZone (AVStreamHook)
-+ (NSTimeZone *)avs_systemTimeZone;
-+ (NSTimeZone *)avs_defaultTimeZone;
-+ (NSTimeZone *)avs_localTimeZone; // 🌟 深层防御: 添加 localTimeZone 声明
++ (NSTimeZone *)avs_systemTimeZone; + (NSTimeZone *)avs_defaultTimeZone; + (NSTimeZone *)avs_localTimeZone; 
 @end
 @interface NSLocale (AVStreamHook)
-+ (NSLocale *)avs_currentLocale;
-+ (NSLocale *)avs_autoupdatingCurrentLocale; // 🌟 深层防御: 添加 autoupdatingCurrentLocale 声明
-+ (NSArray<NSString *> *)avs_preferredLanguages;
++ (NSLocale *)avs_currentLocale; + (NSLocale *)avs_autoupdatingCurrentLocale; + (NSArray<NSString *> *)avs_preferredLanguages;
 @end
 @interface UIWindow (AVStreamHook)
-- (void)avs_becomeKeyWindow;
-- (void)avs_makeKeyAndVisible;
-- (void)avs_setupGestures;
+- (void)avs_becomeKeyWindow; - (void)avs_makeKeyAndVisible; - (void)avs_setupGestures;
 @end
 @interface AVCaptureVideoDataOutput (AVStreamHook)
 - (void)avs_setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue;
@@ -523,9 +546,53 @@ static NSString *g_fakeLocale = nil;
 - (void)avs_setMetadataObjectsDelegate:(id)delegate queue:(dispatch_queue_t)queue;
 @end
 
+// 🌟 终极防御 (Wi-Fi 伪装): 声明 NEHotspotNetwork
+@interface NEHotspotNetwork (AVStreamHook)
++ (void)avs_fetchCurrentWithCompletionHandler:(void (^)(NEHotspotNetwork * _Nullable currentNetwork))completionHandler;
+- (NSString *)avs_SSID;
+- (NSString *)avs_BSSID;
+@end
+
 // ============================================================================
-// 【7. 系统底层 Hook 实现 (🌟 全面接管 CTCarrier / CLLocation / NSLocale 等)】
+// 【7. 系统底层 Hook 实现 (含 Fishhook C 函数接管)】
 // ============================================================================
+
+// 🌟 终极防御 (Wi-Fi 伪装): 底层 C 函数劫持逻辑 (CNCopyCurrentNetworkInfo)
+static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName);
+CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
+    if (g_envSpoofingEnabled && g_fakeSSID && g_fakeBSSID) {
+        NSDictionary *fakeNetworkInfo = @{
+            (id)kCNNetworkInfoKeySSID: g_fakeSSID,
+            (id)kCNNetworkInfoKeyBSSID: g_fakeBSSID,
+            (id)kCNNetworkInfoKeySSIDData: [g_fakeSSID dataUsingEncoding:NSUTF8StringEncoding]
+        };
+        // 注意：底层 C 函数需要遵循 CoreFoundation 的内存管理，必须使用 CFBridgingRetain
+        return CFBridgingRetain(fakeNetworkInfo);
+    }
+    if (orig_CNCopyCurrentNetworkInfo) { return orig_CNCopyCurrentNetworkInfo(interfaceName); }
+    return NULL;
+}
+
+// 🌟 终极防御 (Wi-Fi 伪装): 现代 iOS 14+ 网络接口劫持逻辑
+@implementation NEHotspotNetwork (AVStreamHook)
++ (void)avs_fetchCurrentWithCompletionHandler:(void (^)(NEHotspotNetwork * _Nullable currentNetwork))completionHandler {
+    if (g_envSpoofingEnabled && g_fakeSSID) {
+        [self avs_fetchCurrentWithCompletionHandler:^(NEHotspotNetwork * _Nullable currentNetwork) {
+            if (completionHandler) completionHandler(currentNetwork); 
+        }];
+    } else { [self avs_fetchCurrentWithCompletionHandler:completionHandler]; }
+}
+- (NSString *)avs_SSID {
+    if (g_envSpoofingEnabled && g_fakeSSID) return g_fakeSSID;
+    return [self avs_SSID];
+}
+- (NSString *)avs_BSSID {
+    if (g_envSpoofingEnabled && g_fakeBSSID) return g_fakeBSSID;
+    return [self avs_BSSID];
+}
+@end
+
+
 @implementation CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName { return g_envSpoofingEnabled && g_fakeCarrierName ? g_fakeCarrierName : [self avs_carrierName]; }
 - (NSString *)avs_isoCountryCode { return g_envSpoofingEnabled && g_fakeISO ? g_fakeISO : [self avs_isoCountryCode]; }
@@ -535,22 +602,16 @@ static NSString *g_fakeLocale = nil;
 @implementation CTTelephonyNetworkInfo (AVStreamHook)
 - (NSDictionary<NSString *,CTCarrier *> *)avs_serviceSubscriberCellularProviders {
     if (!g_envSpoofingEnabled) return [self avs_serviceSubscriberCellularProviders];
-    CTCarrier *fakeCarrier = [[NSClassFromString(@"CTCarrier") alloc] init];
-    return @{@"0000000100000001": fakeCarrier};
+    CTCarrier *fakeCarrier = [[NSClassFromString(@"CTCarrier") alloc] init]; return @{@"0000000100000001": fakeCarrier};
 }
 @end
 
 @implementation CLLocation (AVStreamHook)
 - (CLLocationCoordinate2D)avs_coordinate {
-    if (g_envSpoofingEnabled && g_fakeLat != 0.0) {
-        return CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon);
-    }
+    if (g_envSpoofingEnabled && g_fakeLat != 0.0) return CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon);
     return [self avs_coordinate];
 }
-- (CLLocationDistance)avs_altitude {
-    if (g_envSpoofingEnabled && g_fakeLat != 0.0) { return 45.0 + (g_driftLat * 1000); }
-    return [self avs_altitude];
-}
+- (CLLocationDistance)avs_altitude { if (g_envSpoofingEnabled && g_fakeLat != 0.0) return 45.0 + (g_driftLat * 1000); return [self avs_altitude]; }
 - (CLLocationAccuracy)avs_horizontalAccuracy { if (g_envSpoofingEnabled && g_fakeLat != 0.0) return 5.0; return [self avs_horizontalAccuracy]; }
 - (CLLocationAccuracy)avs_verticalAccuracy { if (g_envSpoofingEnabled && g_fakeLat != 0.0) return 4.0; return [self avs_verticalAccuracy]; }
 - (CLLocationSpeed)avs_speed { if (g_envSpoofingEnabled && g_fakeLat != 0.0) return -1.0; return [self avs_speed]; }
@@ -601,11 +662,11 @@ static NSString *g_fakeLocale = nil;
 @implementation NSTimeZone (AVStreamHook)
 + (NSTimeZone *)avs_systemTimeZone { if (g_envSpoofingEnabled && g_fakeTZ) { NSTimeZone *tz = [NSTimeZone timeZoneWithName:g_fakeTZ]; if (tz) return tz; } return [self avs_systemTimeZone]; }
 + (NSTimeZone *)avs_defaultTimeZone { if (g_envSpoofingEnabled && g_fakeTZ) { NSTimeZone *tz = [NSTimeZone timeZoneWithName:g_fakeTZ]; if (tz) return tz; } return [self avs_defaultTimeZone]; }
-+ (NSTimeZone *)avs_localTimeZone { if (g_envSpoofingEnabled && g_fakeTZ) { NSTimeZone *tz = [NSTimeZone timeZoneWithName:g_fakeTZ]; if (tz) return tz; } return [self avs_localTimeZone]; } // 🌟 深层防御
++ (NSTimeZone *)avs_localTimeZone { if (g_envSpoofingEnabled && g_fakeTZ) { NSTimeZone *tz = [NSTimeZone timeZoneWithName:g_fakeTZ]; if (tz) return tz; } return [self avs_localTimeZone]; } 
 @end
 @implementation NSLocale (AVStreamHook)
 + (NSLocale *)avs_currentLocale { if (g_envSpoofingEnabled && g_fakeLocale) { return [NSLocale localeWithLocaleIdentifier:g_fakeLocale]; } return [self avs_currentLocale]; }
-+ (NSLocale *)avs_autoupdatingCurrentLocale { if (g_envSpoofingEnabled && g_fakeLocale) { return [NSLocale localeWithLocaleIdentifier:g_fakeLocale]; } return [self avs_autoupdatingCurrentLocale]; } // 🌟 深层防御
++ (NSLocale *)avs_autoupdatingCurrentLocale { if (g_envSpoofingEnabled && g_fakeLocale) { return [NSLocale localeWithLocaleIdentifier:g_fakeLocale]; } return [self avs_autoupdatingCurrentLocale]; } 
 + (NSArray<NSString *> *)avs_preferredLanguages { if (g_envSpoofingEnabled && g_fakeLocale) { return @[g_fakeLocale, @"en-US"]; } return [self avs_preferredLanguages]; }
 @end
 
@@ -658,6 +719,9 @@ static NSString *g_fakeLocale = nil;
         g_fakeCarrierName = [defaults stringForKey:@"avs_env_carrier"] ?: @"Telekom.de";
         g_fakeTZ = [defaults stringForKey:@"avs_env_tz"] ?: @"Europe/Berlin";
         g_fakeLocale = [defaults stringForKey:@"avs_env_locale"] ?: @"de_DE";
+        // 🌟 终极防御 (Wi-Fi 伪装): 读取缓存
+        g_fakeSSID = [defaults stringForKey:@"avs_env_ssid"] ?: @"FritzBox-7590";
+        g_fakeBSSID = [defaults stringForKey:@"avs_env_bssid"] ?: @"c4:9f:4c:11:2b:7a";
     } else { g_envSpoofingEnabled = NO; }
 
     method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(becomeKeyWindow)), class_getInstanceMethod([UIWindow class], @selector(avs_becomeKeyWindow)));
@@ -699,14 +763,32 @@ static NSString *g_fakeLocale = nil;
     if (tzClass) {
         method_exchangeImplementations(class_getClassMethod(tzClass, @selector(systemTimeZone)), class_getClassMethod(tzClass, @selector(avs_systemTimeZone)));
         method_exchangeImplementations(class_getClassMethod(tzClass, @selector(defaultTimeZone)), class_getClassMethod(tzClass, @selector(avs_defaultTimeZone)));
-        method_exchangeImplementations(class_getClassMethod(tzClass, @selector(localTimeZone)), class_getClassMethod(tzClass, @selector(avs_localTimeZone))); // 🌟 深层防御: Hook localTimeZone
+        method_exchangeImplementations(class_getClassMethod(tzClass, @selector(localTimeZone)), class_getClassMethod(tzClass, @selector(avs_localTimeZone)));
     }
     Class loclClass = NSClassFromString(@"NSLocale");
     if (loclClass) {
         method_exchangeImplementations(class_getClassMethod(loclClass, @selector(currentLocale)), class_getClassMethod(loclClass, @selector(avs_currentLocale)));
-        method_exchangeImplementations(class_getClassMethod(loclClass, @selector(autoupdatingCurrentLocale)), class_getClassMethod(loclClass, @selector(avs_autoupdatingCurrentLocale))); // 🌟 深层防御: Hook autoupdatingCurrentLocale
+        method_exchangeImplementations(class_getClassMethod(loclClass, @selector(autoupdatingCurrentLocale)), class_getClassMethod(loclClass, @selector(avs_autoupdatingCurrentLocale)));
         method_exchangeImplementations(class_getClassMethod(loclClass, @selector(preferredLanguages)), class_getClassMethod(loclClass, @selector(avs_preferredLanguages)));
     }
+
+    // 🌟 终极防御 (Wi-Fi 伪装): Hook iOS 14+ 网络接口 (Obj-C 层面)
+    Class neClass = NSClassFromString(@"NEHotspotNetwork");
+    if (neClass) {
+        method_exchangeImplementations(class_getClassMethod(neClass, @selector(fetchCurrentWithCompletionHandler:)), class_getClassMethod(neClass, @selector(avs_fetchCurrentWithCompletionHandler:)));
+        method_exchangeImplementations(class_getInstanceMethod(neClass, @selector(SSID)), class_getInstanceMethod(neClass, @selector(avs_SSID)));
+        method_exchangeImplementations(class_getInstanceMethod(neClass, @selector(BSSID)), class_getInstanceMethod(neClass, @selector(avs_BSSID)));
+    }
+
+    // =========================================================
+    // 🌟 Fishhook 整合: 执行底层 C 函数替换 (Fishhook 免越狱重绑定)
+    // =========================================================
+    struct rebinding cn_rebinding = {
+        "CNCopyCurrentNetworkInfo", 
+        (void *)my_CNCopyCurrentNetworkInfo, 
+        (void **)&orig_CNCopyCurrentNetworkInfo
+    };
+    rebind_symbols((struct rebinding[1]){cn_rebinding}, 1);
 }
 @end
 #pragma clang diagnostic pop
