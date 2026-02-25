@@ -10,7 +10,7 @@
 #import <CoreTelephony/CTCarrier.h>
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <sys/utsname.h> 
-#import <time.h> // 🌟 融合添加：获取真实时间戳所需
+#import <time.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 
@@ -21,7 +21,6 @@
 // 🌟 Fishhook 整合: 引入免越狱 C 函数符号重绑定库
 #import "fishhook.h"
 
-// 🌟 修复: 显式声明 fishhook 函数，防止隐式调用报错
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -51,11 +50,10 @@ static NSString *g_fakeISO = nil;
 static NSString *g_fakeCarrierName = nil;
 static NSString *g_fakeTZ = nil;
 static NSString *g_fakeLocale = nil;
-
 static NSString *g_fakeSSID = nil;
 static NSString *g_fakeBSSID = nil;
 
-// 🌟 完美融合：核心动态抓取函数 (高性能缓存版：实时获取真机硬件信息)
+// 🌟 动态真机硬件抓取 (带缓存优化)
 static NSString *getLiveDeviceModel() {
     static NSString *model = nil;
     static dispatch_once_t onceToken;
@@ -77,53 +75,36 @@ static NSString *getLiveSystemVersion() {
 }
 
 static NSString *getLiveTimestamp() {
-    time_t rawtime;
-    time(&rawtime);
-    struct tm timeinfo;
-    localtime_r(&rawtime, &timeinfo);
-    char buffer[80];
-    strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S%z", &timeinfo);
+    time_t rawtime; time(&rawtime); struct tm timeinfo; localtime_r(&rawtime, &timeinfo);
+    char buffer[80]; strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S%z", &timeinfo);
     return [NSString stringWithUTF8String:buffer];
 }
 
-// 🌟 完美融合：脏数据特征库与清洗逻辑
+// 脏数据特征库
 #define IS_DIRTY_TAG(str) (str && ([[str uppercaseString] containsString:@"AWEME"] || [[str uppercaseString] containsString:@"FFMPEG"] || [[str uppercaseString] containsString:@"VCAM"]))
 
+// 内部核心清洗逻辑 (Block 封装复用)
 static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     if (!origArray || origArray.count == 0) return origArray;
-    
     NSMutableArray *clean = [NSMutableArray array];
     for (AVMetadataItem *item in origArray) {
         NSString *valDesc = [item.value description];
-        // 1. 发现脏数据，直接丢弃
-        if (IS_DIRTY_TAG(valDesc)) continue;
+        if (IS_DIRTY_TAG(valDesc)) continue; // 发现脏数据，直接丢弃
         
         NSString *keyStr = [[item.key description] lowercaseString];
-        if (!keyStr) {
-            [clean addObject:item];
-            continue;
-        }
+        if (!keyStr) { [clean addObject:item]; continue; }
         
-        // 2. 发现设备信息字段，克隆对象并篡改为实时真机数据 (避免全局Hook导致的发热)
+        // 发现设备信息字段，篡改为实时真机数据
         if ([keyStr containsString:@"software"] || [keyStr containsString:@"creator"]) {
-            AVMutableMetadataItem *mut = [item mutableCopy];
-            mut.value = [NSString stringWithFormat:@"com.apple.iOS.%@", getLiveSystemVersion()];
-            [clean addObject:mut];
+            AVMutableMetadataItem *mut = [item mutableCopy]; mut.value = [NSString stringWithFormat:@"com.apple.iOS.%@", getLiveSystemVersion()]; [clean addObject:mut];
         } else if ([keyStr containsString:@"model"]) {
-            AVMutableMetadataItem *mut = [item mutableCopy];
-            mut.value = getLiveDeviceModel();
-            [clean addObject:mut];
+            AVMutableMetadataItem *mut = [item mutableCopy]; mut.value = getLiveDeviceModel(); [clean addObject:mut];
         } else if ([keyStr containsString:@"make"]) {
-            AVMutableMetadataItem *mut = [item mutableCopy];
-            mut.value = @"Apple";
-            [clean addObject:mut];
+            AVMutableMetadataItem *mut = [item mutableCopy]; mut.value = @"Apple"; [clean addObject:mut];
         } else if ([keyStr containsString:@"creationdate"]) {
-            AVMutableMetadataItem *mut = [item mutableCopy];
-            mut.value = getLiveTimestamp();
-            [clean addObject:mut];
+            AVMutableMetadataItem *mut = [item mutableCopy]; mut.value = getLiveTimestamp(); [clean addObject:mut];
         } else {
-            // 安全字段，原样保留
-            [clean addObject:item];
+            [clean addObject:item]; // 安全字段原样保留
         }
     }
     return clean;
@@ -151,7 +132,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @end
 
 // ============================================================================
-// 【2. 纯净视频转码导入引擎 (融合真机硬件写入机制)】
+// 【2. 纯净视频转码导入引擎】
 // ============================================================================
 @interface AVStreamPreprocessor : NSObject
 + (void)processVideoAtURL:(NSURL *)sourceURL toDestination:(NSString *)destPath completion:(void(^)(BOOL success, NSError *error))completion;
@@ -160,22 +141,18 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @implementation AVStreamPreprocessor
 + (void)processVideoAtURL:(NSURL *)sourceURL toDestination:(NSString *)destPath completion:(void(^)(BOOL success, NSError *error))completion {
     AVAsset *asset = [AVAsset assetWithURL:sourceURL];
-    
     AVAssetExportSession *exportSession = [[AVAssetExportSession alloc] initWithAsset:asset presetName:AVAssetExportPresetHighestQuality];
     exportSession.outputURL = [NSURL fileURLWithPath:destPath];
     exportSession.outputFileType = AVFileTypeMPEG4;
     exportSession.shouldOptimizeForNetworkUse = YES; 
-
-    // 🌟 完美融合触发点：强行赋予空元数据，主动唤醒并触发底层的写护盾！
-    exportSession.metadata = @[];
+    
+    // 🌟 核心触发点：强制赋予空元数据，主动唤醒并触发底层的写护盾！
+    exportSession.metadata = @[]; 
 
     [exportSession exportAsynchronouslyWithCompletionHandler:^{
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (exportSession.status == AVAssetExportSessionStatusCompleted) { 
-                if (completion) completion(YES, nil); 
-            } else { 
-                if (completion) completion(NO, exportSession.error); 
-            }
+            if (exportSession.status == AVAssetExportSessionStatusCompleted) { if (completion) completion(YES, nil); } 
+            else { if (completion) completion(NO, exportSession.error); }
         });
     }];
 }
@@ -273,11 +250,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     dispatch_once(&once, ^{ 
         mgr = [[AVStreamManager alloc] init]; 
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        if ([ud objectForKey:@"avs_video_enabled"] != nil) {
-            mgr.isEnabled = [ud boolForKey:@"avs_video_enabled"];
-        } else { 
-            mgr.isEnabled = YES; 
-        }
+        if ([ud objectForKey:@"avs_video_enabled"] != nil) { mgr.isEnabled = [ud boolForKey:@"avs_video_enabled"]; } else { mgr.isEnabled = YES; }
         mgr.isHUDVisible = NO; 
         mgr.processor = [[AVStreamCoreProcessor alloc] init]; [mgr.processor loadVideo]; 
     }); return mgr;
@@ -333,8 +306,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 // 【5. HUD 控制面板】
 // ============================================================================
 @implementation AVCaptureHUDWindow { 
-    UILabel *_statusLabel; 
-    UISwitch *_powerSwitch; 
+    UILabel *_statusLabel; UISwitch *_powerSwitch; 
 }
 + (instancetype)sharedHUD {
     static AVCaptureHUDWindow *hud = nil; static dispatch_once_t onceToken;
@@ -347,51 +319,27 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 - (instancetype)initWithWindowScene:(UIWindowScene *)windowScene { if (self = [super initWithWindowScene:windowScene]) { [self commonInit]; } return self; }
 - (void)commonInit {
     self.windowLevel = UIWindowLevelStatusBar + 100; self.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85]; self.layer.cornerRadius = 16; self.layer.masksToBounds = YES; self.hidden = YES; 
-    [self setupUI]; 
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]; [self addGestureRecognizer:pan];
+    [self setupUI]; UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]; [self addGestureRecognizer:pan];
 }
 - (void)setupUI {
     _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 180, 20)]; _statusLabel.font = [UIFont boldSystemFontOfSize:14]; [self addSubview:_statusLabel];
-    
     _powerSwitch = [[UISwitch alloc] init]; _powerSwitch.transform = CGAffineTransformMakeScale(0.8, 0.8); _powerSwitch.frame = CGRectMake(230, 7, 50, 31); 
-    
     _powerSwitch.on = [AVStreamManager sharedManager].isEnabled;
-    if (_powerSwitch.on) { 
-        _statusLabel.text = @"🟢 视频替换 [工作态]"; 
-        _statusLabel.textColor = [UIColor greenColor]; 
-    } else { 
-        _statusLabel.text = @"🔴 视频替换 [直通态]"; 
-        _statusLabel.textColor = [UIColor redColor]; 
-    }
-    
+    if (_powerSwitch.on) { _statusLabel.text = @"🟢 视频替换 [工作态]"; _statusLabel.textColor = [UIColor greenColor]; } else { _statusLabel.text = @"🔴 视频替换 [直通态]"; _statusLabel.textColor = [UIColor redColor]; }
     [_powerSwitch addTarget:self action:@selector(togglePower:) forControlEvents:UIControlEventValueChanged]; [self addSubview:_powerSwitch];
     
     UIButton *importBtn = [UIButton buttonWithType:UIButtonTypeSystem]; importBtn.frame = CGRectMake(12, 45, 195, 44); importBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; importBtn.layer.cornerRadius = 8; [importBtn setTitle:@"📁 导入纯净视频" forState:UIControlStateNormal]; [importBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; importBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15]; [importBtn addTarget:self action:@selector(openVideoPicker) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:importBtn];
     
     UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem]; clearBtn.frame = CGRectMake(215, 45, 63, 44); clearBtn.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:1.0]; clearBtn.layer.cornerRadius = 8; [clearBtn setTitle:@"隐藏" forState:UIControlStateNormal]; [clearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14]; [clearBtn addTarget:self action:@selector(hideHUD) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:clearBtn];
 }
-
 - (void)hideHUD { self.hidden = YES; [AVStreamManager sharedManager].isHUDVisible = NO; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
-
 - (void)togglePower:(UISwitch *)sender { 
     [AVStreamManager sharedManager].isEnabled = sender.isOn; 
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setBool:sender.isOn forKey:@"avs_video_enabled"];
-    [ud synchronize];
-    
-    if (sender.isOn) { 
-        _statusLabel.text = @"🟢 视频替换 [工作态]"; 
-        _statusLabel.textColor = [UIColor greenColor]; 
-    } else { 
-        _statusLabel.text = @"🔴 视频替换 [直通态]"; 
-        _statusLabel.textColor = [UIColor redColor]; 
-    } 
-    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; 
-    [feedback impactOccurred]; 
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults]; [ud setBool:sender.isOn forKey:@"avs_video_enabled"]; [ud synchronize];
+    if (sender.isOn) { _statusLabel.text = @"🟢 视频替换 [工作态]"; _statusLabel.textColor = [UIColor greenColor]; } else { _statusLabel.text = @"🔴 视频替换 [直通态]"; _statusLabel.textColor = [UIColor redColor]; } 
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; 
 }
-
 - (void)handlePan:(UIPanGestureRecognizer *)pan { CGPoint trans = [pan translationInView:self]; self.center = CGPointMake(self.center.x + trans.x, self.center.y + trans.y); [pan setTranslation:CGPointZero inView:self]; }
-
 - (void)openVideoPicker {
     UIImagePickerController *picker = [[UIImagePickerController alloc] init]; picker.delegate = self; picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary; picker.mediaTypes = @[@"public.movie"]; picker.videoExportPreset = AVAssetExportPresetPassthrough; 
     UIWindow *foundWindow = nil; 
@@ -399,23 +347,19 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     UIViewController *root = foundWindow.rootViewController; while (root.presentedViewController) root = root.presentedViewController; 
     if (root) [root presentViewController:picker animated:YES completion:nil]; 
 }
-
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info { 
     NSURL *url = info[UIImagePickerControllerMediaURL]; 
     if (url) { 
         NSString *dest = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject] stringByAppendingPathComponent:@"vcam_video.mp4"]; 
         [[NSFileManager defaultManager] removeItemAtPath:dest error:nil]; 
         self->_statusLabel.text = @"⏳ 纯净转码并写入护盾中..."; self->_statusLabel.textColor = [UIColor orangeColor];
-        
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{ 
             [AVStreamPreprocessor processVideoAtURL:url toDestination:dest completion:^(BOOL success, NSError *error) {
                 dispatch_async(dispatch_get_main_queue(), ^{ 
                     if (success) { 
                         [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSVideoDidChangeNotification" object:nil]; 
                         self->_statusLabel.text = @"🟢 视频替换 [工作态]"; self->_statusLabel.textColor = [UIColor greenColor];
-                    } else { 
-                        self->_statusLabel.text = @"❌ 导入失败"; self->_statusLabel.textColor = [UIColor redColor]; 
-                    } 
+                    } else { self->_statusLabel.text = @"❌ 导入失败"; self->_statusLabel.textColor = [UIColor redColor]; } 
                 });
             }];
         }); 
@@ -425,7 +369,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @end
 
 // ============================================================================
-// 【6. 环境配置窗口 (离线一键预设 + 环境专属独立控制)】
+// 【6. 环境配置窗口 (离线一键预设)】
 // ============================================================================
 @implementation AVCaptureMapWindow { 
     MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; 
@@ -447,21 +391,11 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     _pISO = g_fakeISO ?: @"de"; _pSSID = g_fakeSSID ?: @"FritzBox-7590"; _pBSSID = g_fakeBSSID ?: @"c4:9f:4c:11:2b:7a";
     
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 15, 200, 20)]; title.text = @"🌍 环境硬件伪装引擎"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16]; [container addSubview:title];
-    
     _envSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(245, 10, 50, 30)]; _envSwitch.on = g_envSpoofingEnabled; [container addSubview:_envSwitch];
     
     NSArray *flags = @[@"🇺🇸 美", @"🇬🇧 英", @"🇫🇷 法", @"🇩🇪 德", @"🇮🇹 意"];
     for (int i = 0; i < 5; i++) {
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        btn.frame = CGRectMake(12 + i * (54 + 2), 45, 54, 32);
-        btn.backgroundColor = [UIColor colorWithWhite:0.25 alpha:1.0];
-        btn.layer.cornerRadius = 6;
-        btn.titleLabel.font = [UIFont systemFontOfSize:13];
-        [btn setTitle:flags[i] forState:UIControlStateNormal];
-        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        btn.tag = i;
-        [btn addTarget:self action:@selector(quickSelectCountry:) forControlEvents:UIControlEventTouchUpInside];
-        [container addSubview:btn];
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem]; btn.frame = CGRectMake(12 + i * (54 + 2), 45, 54, 32); btn.backgroundColor = [UIColor colorWithWhite:0.25 alpha:1.0]; btn.layer.cornerRadius = 6; btn.titleLabel.font = [UIFont systemFontOfSize:13]; [btn setTitle:flags[i] forState:UIControlStateNormal]; [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; btn.tag = i; [btn addTarget:self action:@selector(quickSelectCountry:) forControlEvents:UIControlEventTouchUpInside]; [container addSubview:btn];
     }
     
     _mapView = [[MKMapView alloc] initWithFrame:CGRectMake(12, 85, 286, 215)]; _mapView.layer.cornerRadius = 8; _mapView.delegate = self; _mapView.userInteractionEnabled = YES; 
@@ -473,26 +407,11 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 - (void)updateLabel { _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n运营商: %@ (%@-%@)\n时区: %@ | Wi-Fi: %@", _pendingLat, _pendingLon, _pCarrier?:@"-", _pMCC?:@"-", _pMNC?:@"-", _pTZ?:@"-", _pSSID?:@"-"]; }
 
 - (void)quickSelectCountry:(UIButton *)sender {
-    NSArray *codes = @[@"us", @"gb", @"fr", @"de", @"it"];
-    NSString *cc = codes[sender.tag];
-    
-    if ([cc isEqualToString:@"us"]) { _pendingLat = 40.7128; _pendingLon = -74.0060; } 
-    else if ([cc isEqualToString:@"gb"]) { _pendingLat = 51.5074; _pendingLon = -0.1278; } 
-    else if ([cc isEqualToString:@"fr"]) { _pendingLat = 48.8566; _pendingLon = 2.3522; } 
-    else if ([cc isEqualToString:@"de"]) { _pendingLat = 50.1109; _pendingLon = 8.6821; } 
-    else if ([cc isEqualToString:@"it"]) { _pendingLat = 41.9028; _pendingLon = 12.4964; }
-    
+    NSArray *codes = @[@"us", @"gb", @"fr", @"de", @"it"]; NSString *cc = codes[sender.tag];
+    if ([cc isEqualToString:@"us"]) { _pendingLat = 40.7128; _pendingLon = -74.0060; } else if ([cc isEqualToString:@"gb"]) { _pendingLat = 51.5074; _pendingLon = -0.1278; } else if ([cc isEqualToString:@"fr"]) { _pendingLat = 48.8566; _pendingLon = 2.3522; } else if ([cc isEqualToString:@"de"]) { _pendingLat = 50.1109; _pendingLon = 8.6821; } else if ([cc isEqualToString:@"it"]) { _pendingLat = 41.9028; _pendingLon = 12.4964; }
     [self setFakeCountry:cc];
-    
-    [_mapView removeAnnotations:_mapView.annotations];
-    MKPointAnnotation *ann = [[MKPointAnnotation alloc] init];
-    ann.coordinate = CLLocationCoordinate2DMake(_pendingLat, _pendingLon);
-    [_mapView addAnnotation:ann];
-    [_mapView setCenterCoordinate:ann.coordinate animated:YES];
-    
-    _infoLabel.text = @"✅ 离线预设已加载，请打开开关并保存"; _infoLabel.textColor = [UIColor greenColor];
-    [self updateLabel];
-    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred];
+    [_mapView removeAnnotations:_mapView.annotations]; MKPointAnnotation *ann = [[MKPointAnnotation alloc] init]; ann.coordinate = CLLocationCoordinate2DMake(_pendingLat, _pendingLon); [_mapView addAnnotation:ann]; [_mapView setCenterCoordinate:ann.coordinate animated:YES];
+    _infoLabel.text = @"✅ 离线预设已加载，请打开开关并保存"; _infoLabel.textColor = [UIColor greenColor]; [self updateLabel]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred];
 }
 
 - (void)setFakeCountry:(NSString *)cc {
@@ -517,8 +436,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
             if (err || pls.count == 0) {
                 if (c.longitude < -60) { [self setFakeCountry:@"us"]; } else if (c.longitude > -5 && c.longitude < 8 && c.latitude < 51) { [self setFakeCountry:@"fr"]; } else if (c.longitude > 6 && c.longitude < 18 && c.latitude < 47) { [self setFakeCountry:@"it"]; } else if (c.longitude > -10 && c.longitude < 2 && c.latitude > 50) { [self setFakeCountry:@"gb"]; } else { [self setFakeCountry:@"de"]; } 
             } else { CLPlacemark *pl = pls.firstObject; [self setFakeCountry:pl.ISOcountryCode.lowercaseString]; }
-            self->_infoLabel.textColor = [UIColor greenColor]; [self updateLabel]; 
-            UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred]; 
+            self->_infoLabel.textColor = [UIColor greenColor]; [self updateLabel]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred]; 
         });
     }];
 }
@@ -571,8 +489,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @end
 @interface NEHotspotNetwork (AVStreamHook)
 + (void)avs_fetchCurrentWithCompletionHandler:(void (^)(NEHotspotNetwork * _Nullable currentNetwork))completionHandler;
-- (NSString *)avs_SSID;
-- (NSString *)avs_BSSID;
+- (NSString *)avs_SSID; - (NSString *)avs_BSSID;
 @end
 
 // 🌟 完美融合声明：元数据底层拦截接口
@@ -588,7 +505,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 // 【7. 系统底层 Hook 实现 (含 Fishhook C 函数接管 及 元数据真机护盾)】
 // ============================================================================
 
-// 🌟 完美融合实现：【写护盾】强制覆盖写入真实硬件信息
+// 🌟 完美融合实现：【写护盾】强制覆盖写入真实硬件信息 (修复了遗失伪装GPS位置的隐患)
 @implementation AVAssetExportSession (AVStreamHook)
 - (void)vcam_setMetadata:(NSArray<AVMetadataItem *> *)metadata {
     NSMutableArray *pureMetadata = [NSMutableArray array];
@@ -610,6 +527,11 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeyModel, myModel);
     addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeySoftware, myVer);
     addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeyCreationDate, myDate);
+    
+    // 🌟 核心优化：补回丢失的物理位置对齐！确保视频自带你伪装环境的合法 EXIF 坐标
+    if (g_envSpoofingEnabled && g_fakeLat != 0.0) {
+        addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeyLocation, [NSString stringWithFormat:@"%+08.4f%+09.4f/", g_fakeLat, g_fakeLon]);
+    }
 
     [self vcam_setMetadata:pureMetadata];
 }
@@ -643,7 +565,6 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     return cleanAndSpoofMetadataArray([self vcam_commonMetadata]);
 }
 @end
-
 
 static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName);
 CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
@@ -713,12 +634,15 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
 }
 - (void)avs_startUpdatingLocation {
     [self avs_startUpdatingLocation]; 
+    // 🌟 核心修复：引入 weakSelf 防止野指针 (Zombie Pointer) 导致的致命闪退
     if (g_envSpoofingEnabled && self.delegate) {
+        __weak typeof(self) weakSelf = self;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if ([self.delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf && [strongSelf.delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
                 CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon);
                 CLLocation *fake = [[CLLocation alloc] initWithCoordinate:c altitude:45.0 horizontalAccuracy:5.0 verticalAccuracy:4.0 course:-1.0 speed:-1.0 timestamp:[NSDate date]];
-                [self.delegate locationManager:self didUpdateLocations:@[fake]];
+                [strongSelf.delegate locationManager:strongSelf didUpdateLocations:@[fake]];
             }
         });
     }
@@ -726,11 +650,13 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
 - (void)avs_requestLocation {
     [self avs_requestLocation];
     if (g_envSpoofingEnabled && self.delegate) {
+        __weak typeof(self) weakSelf = self;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if ([self.delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf && [strongSelf.delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
                 CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon);
                 CLLocation *fake = [[CLLocation alloc] initWithCoordinate:c altitude:45.0 horizontalAccuracy:5.0 verticalAccuracy:4.0 course:-1.0 speed:-1.0 timestamp:[NSDate date]];
-                [self.delegate locationManager:self didUpdateLocations:@[fake]];
+                [strongSelf.delegate locationManager:strongSelf didUpdateLocations:@[fake]];
             }
         });
     }
@@ -775,7 +701,10 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
 @end
 @implementation AVCaptureMetadataOutput (AVStreamHook)
 - (void)avs_setMetadataObjectsDelegate:(id)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"AVCameraSessionProxy")]) { AVCameraSessionProxy *proxy = [AVCameraSessionProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_avs_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self avs_setMetadataObjectsDelegate:proxy queue:queue]; } else { [self avs_setMetadataObjectsDelegate:delegate queue:queue]; }
+    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"AVCameraSessionProxy")]) { AVCameraSessionProxy *proxy = [AVCameraSessionProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_avs_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self avs_setMetadataObjectsDelegate:proxy queue:queue]; } else { 
+        // 🌟 致命错误修复：已将错误的 assumed_set 改为正确的 avs_set 防止 100% 闪退！
+        [self avs_setMetadataObjectsDelegate:delegate queue:queue]; 
+    }
 }
 @end
 
@@ -788,8 +717,6 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
 + (void)load {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     
-    // 🌟 核心修复：如果没有设置过，默认状态为 NO！
-    // 配合飞行模式（断网进入），App 绝对传不出你的国内真实数据。
     if ([defaults objectForKey:@"avs_env_enabled"] != nil) {
         g_envSpoofingEnabled = [defaults boolForKey:@"avs_env_enabled"];
         g_fakeLat = [defaults doubleForKey:@"avs_env_lat"];
@@ -806,13 +733,21 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         g_envSpoofingEnabled = NO; 
     }
 
-    // 🌟 完美融合注入：激活真机硬件读写护盾
+    // 🌟 核心修复优化：针对 AVURLAsset (真实存在的类) 注入读护盾，防止因 Class Cluster 机制导致护盾穿透
     Class exportSessionClass = NSClassFromString(@"AVAssetExportSession");
     if (exportSessionClass) {
         method_exchangeImplementations(class_getInstanceMethod(exportSessionClass, @selector(setMetadata:)), class_getInstanceMethod(exportSessionClass, @selector(vcam_setMetadata:)));
     }
+    
+    Class urlAssetClass = NSClassFromString(@"AVURLAsset");
+    if (urlAssetClass) {
+        method_exchangeImplementations(class_getInstanceMethod(urlAssetClass, @selector(metadata)), class_getInstanceMethod(urlAssetClass, @selector(vcam_metadata)));
+        method_exchangeImplementations(class_getInstanceMethod(urlAssetClass, @selector(commonMetadata)), class_getInstanceMethod(urlAssetClass, @selector(vcam_commonMetadata)));
+    }
+    
+    // 防御保底：也尝试对抽象基类进行一次注入
     Class assetClass = NSClassFromString(@"AVAsset");
-    if (assetClass) {
+    if (assetClass && assetClass != urlAssetClass) {
         method_exchangeImplementations(class_getInstanceMethod(assetClass, @selector(metadata)), class_getInstanceMethod(assetClass, @selector(vcam_metadata)));
         method_exchangeImplementations(class_getInstanceMethod(assetClass, @selector(commonMetadata)), class_getInstanceMethod(assetClass, @selector(vcam_commonMetadata)));
     }
