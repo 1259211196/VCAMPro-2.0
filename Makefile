@@ -1,42 +1,22 @@
-# 1. 基础环境配置
-# 指定目标平台、编译器、最新的 SDK 以及最低兼容的 iOS 版本 (因为用到了 NEHotspotNetwork 和 UIWindowScene，建议设为 14.0)
-TARGET := iphone:clang:latest:14.0
-# 指定编译架构，arm64 对应老款全面屏，arm64e 对应 A12 及以上芯片的设备
+# 1. 编译目标与架构配置 (指定 iOS 13.0 以上，支持所有现代 iPhone 架构)
+TARGET := iphone:clang:latest:13.0
 ARCHS = arm64 arm64e
 
-# 关闭调试模式，开启最终打包模式 (能极大减小 dylib 体积并提升运行性能)
-DEBUG = 0
-FINALPACKAGE = 1
+# 2. 编译安装完成后，自动重启的目标 App 进程名 (包含抖音国内版和海外版)
+INSTALL_TARGET_PROCESSES = Aweme musically
 
-# 引入 Theos 通用规则
 include $(THEOS)/makefiles/common.mk
 
-# 2. 插件核心配置
-# 插件的名称，必须与下方变量的前缀保持完全一致
-TWEAK_NAME = VCam
+# 3. 你的插件名称 (⚠️ 注意：请确保这里的名字和你的工程名完全一致)
+TWEAK_NAME = VCAMPro
 
-# 包含的源文件：你的主代码文件 (假设命名为 Tweak.m) 以及刚刚加入的 fishhook.c
-# ⚠️ 注意：如果你的主代码文件不叫 Tweak.m (比如叫 VCam.m)，请将下方的 Tweak.m 改成你实际的文件名
-VCam_FILES = Tweak.m fishhook.c
+# 4. 核心：指定需要编译的源文件 (必须包含主文件 Tweak.m 和 C语言库 fishhook.c)
+VCAMPro_FILES = Tweak.m fishhook.c
 
-# 3. 框架依赖 (极其重要 🌟)
-# 这里必须完整声明你在代码中 #import 的所有系统级 framework，漏掉任何一个都会导致编译失败
-VCam_FRAMEWORKS = Foundation \
-                  UIKit \
-                  AVFoundation \
-                  CoreMedia \
-                  CoreVideo \
-                  VideoToolbox \
-                  CoreImage \
-                  CoreLocation \
-                  MapKit \
-                  CoreTelephony \
-                  SystemConfiguration \
-                  NetworkExtension
+# 5. 核心：导入底层伪装、网络拦截和视频渲染所需的全部 12 个系统框架
+VCAMPro_FRAMEWORKS = Foundation UIKit AVFoundation CoreMedia CoreVideo VideoToolbox CoreImage CoreLocation MapKit CoreTelephony SystemConfiguration NetworkExtension
 
-# 4. 编译参数
-# 开启 ARC (自动引用计数) 以处理 Objective-C 的内存管理
-VCam_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable
+# 6. 开启 ARC 内存管理，防止内存泄漏引起的闪退
+VCAMPro_CFLAGS = -fobjc-arc
 
-# 引入 Theos 的 Tweak 编译规则
 include $(THEOS_MAKE_PATH)/tweak.mk
