@@ -9,17 +9,18 @@
 #import <MapKit/MapKit.h>
 #import <CoreTelephony/CTCarrier.h>
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
+#import <sys/utsname.h> // 🌟 引入系统底层硬件库，用于抓取真实主板代号
 #import <objc/runtime.h>
 #import <objc/message.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
 #pragma clang diagnostic ignored "-Wavailability"
-// 🌟 极速修复方案：让编译器“闭嘴”，强行忽略过期 API 警告，确保 GitHub Actions 编译绿灯通过
+// 🌟 极速修复方案：让编译器“闭嘴”，强行忽略过期 API 警告，确保 Actions 绿灯
 #pragma clang diagnostic ignored "-Wdeprecated-declarations" 
 
 // ============================================================================
-// 【0. 极致安全的 C 语言静态缓存 (支持热更新)】
+// 【0. 极致安全的 C 语言静态缓存 & 完美 GPS 生成器】
 // ============================================================================
 static BOOL g_envSpoofingEnabled = NO;
 static double g_fakeLat = 0.0;
@@ -30,6 +31,23 @@ static NSString *g_fakeISO = nil;
 static NSString *g_fakeCarrierName = nil;
 static NSString *g_fakeTZ = nil;
 static NSString *g_fakeLocale = nil;
+
+// 🌟 核心优化 1：最完美真实的 GPS 伪装引擎 (补齐所有信测参数)
+static CLLocation* generatePerfectFakeLocation(void) {
+    double jLat = (arc4random_uniform(100) - 50) / 1000000.0; 
+    double jLon = (arc4random_uniform(100) - 50) / 1000000.0;
+    double jAlt = (arc4random_uniform(100) - 50) / 10.0;
+    CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat + jLat, g_fakeLon + jLon);
+    
+    // 注入：坐标、海拔(45m左右)、极佳水平精度(5m)、垂直精度(4m)、航向无、速度静止
+    return [[CLLocation alloc] initWithCoordinate:c 
+                                         altitude:(45.0 + jAlt) 
+                               horizontalAccuracy:5.0 
+                                 verticalAccuracy:4.0 
+                                           course:-1.0 
+                                            speed:-1.0 
+                                        timestamp:[NSDate date]];
+}
 
 // ============================================================================
 // 【1. 伪装系统大管家】
@@ -43,7 +61,6 @@ static NSString *g_fakeLocale = nil;
 @property (nonatomic, assign) NSInteger currentSlot;
 @property (nonatomic, strong) NSHashTable *displayLayers;
 @property (nonatomic, strong) AVStreamCoreProcessor *processor;
-
 - (void)updateDisplayLayers;
 @end
 
@@ -57,7 +74,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【2. 异步视频去重洗稿引擎】
+// 【2. 异步视频去重洗稿引擎 (🌟 核心优化 2：全量真机镜像注入)】
 // ============================================================================
 @interface AVStreamPreprocessor : NSObject
 + (void)processVideoAtURL:(NSURL *)sourceURL toDestination:(NSString *)destPath brightness:(CGFloat)brightness contrast:(CGFloat)contrast saturation:(CGFloat)saturation completion:(void(^)(BOOL success, NSError *error))completion;
@@ -70,15 +87,12 @@ static NSString *g_fakeLocale = nil;
     if (!videoTrack) { if (completion) completion(NO, nil); return; }
 
     AVMutableVideoComposition *videoComposition = [AVMutableVideoComposition videoCompositionWithAsset:asset applyingCIFiltersWithHandler:^(AVAsynchronousCIImageFilteringRequest * _Nonnull request) {
-        CIImage *sourceImage = request.sourceImage;
         CIFilter *colorFilter = [CIFilter filterWithName:@"CIColorControls"];
-        [colorFilter setValue:sourceImage forKey:kCIInputImageKey];
+        [colorFilter setValue:request.sourceImage forKey:kCIInputImageKey];
         [colorFilter setValue:@(brightness) forKey:kCIInputBrightnessKey];
         [colorFilter setValue:@(contrast) forKey:kCIInputContrastKey];
         [colorFilter setValue:@(saturation) forKey:kCIInputSaturationKey];
-        CIImage *outputImage = colorFilter.outputImage;
-        if (outputImage) { [request finishWithImage:outputImage context:nil]; } 
-        else { [request finishWithImage:sourceImage context:nil]; }
+        [request finishWithImage:colorFilter.outputImage ?: request.sourceImage context:nil];
     }];
     
     AVAssetExportSession *exportSession = [[AVAssetExportSession alloc] initWithAsset:asset presetName:AVAssetExportPresetHighestQuality];
@@ -86,7 +100,55 @@ static NSString *g_fakeLocale = nil;
     exportSession.outputFileType = AVFileTypeMPEG4;
     exportSession.videoComposition = videoComposition;
     exportSession.shouldOptimizeForNetworkUse = YES; 
-    exportSession.metadata = @[]; 
+
+    // ==========================================================
+    // 🌟 全量真机镜像注入与文件格式化 (清除 aweme 等标签)
+    // ==========================================================
+    NSMutableArray<AVMetadataItem *> *mirrorMetadata = [NSMutableArray array];
+    
+    // 1. 获取底层真实主板代号 (如 iPhone14,2)
+    struct utsname systemInfo;
+    uname(&systemInfo);
+    NSString *hardwareModel = [NSString stringWithCString:systemInfo.machine encoding:NSUTF8StringEncoding];
+    UIDevice *currentDevice = [UIDevice currentDevice];
+
+    AVMutableMetadataItem *makeItem = [[AVMutableMetadataItem alloc] init];
+    makeItem.keySpace = AVMetadataKeySpaceCommon;
+    makeItem.key = AVMetadataCommonKeyMake;
+    makeItem.value = @"Apple";
+    [mirrorMetadata addObject:makeItem];
+    
+    AVMutableMetadataItem *modelItem = [[AVMutableMetadataItem alloc] init];
+    modelItem.keySpace = AVMetadataKeySpaceCommon;
+    modelItem.key = AVMetadataCommonKeyModel;
+    modelItem.value = hardwareModel; // 完美镜像真实硬件型号
+    [mirrorMetadata addObject:modelItem];
+    
+    AVMutableMetadataItem *swItem = [[AVMutableMetadataItem alloc] init];
+    swItem.keySpace = AVMetadataKeySpaceCommon;
+    swItem.key = AVMetadataCommonKeySoftware;
+    swItem.value = [NSString stringWithFormat:@"%@ %@", currentDevice.systemName, currentDevice.systemVersion];
+    [mirrorMetadata addObject:swItem];
+    
+    AVMutableMetadataItem *dateItem = [[AVMutableMetadataItem alloc] init];
+    dateItem.keySpace = AVMetadataKeySpaceCommon;
+    dateItem.key = AVMetadataCommonKeyCreationDate;
+    NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
+    dateItem.value = [formatter stringFromDate:[NSDate date]];
+    [mirrorMetadata addObject:dateItem];
+
+    // 2. 注入视频文件级的真实地理位置 EXIF (标准 ISO 6709 格式)
+    if (g_envSpoofingEnabled && g_fakeLat != 0.0) {
+        AVMutableMetadataItem *locItem = [[AVMutableMetadataItem alloc] init];
+        locItem.keySpace = AVMetadataKeySpaceCommon;
+        locItem.key = AVMetadataCommonKeyLocation;
+        locItem.value = [NSString stringWithFormat:@"%+08.4f%+09.4f/", g_fakeLat, g_fakeLon]; 
+        [mirrorMetadata addObject:locItem];
+    }
+
+    // 强行覆盖容器，不留任何剪辑痕迹
+    exportSession.metadata = mirrorMetadata;
+    // ==========================================================
 
     [exportSession exportAsynchronouslyWithCompletionHandler:^{
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -178,12 +240,11 @@ static NSString *g_fakeLocale = nil;
         if (_lastPixelBuffer) CVPixelBufferRelease(_lastPixelBuffer);
         _lastPixelBuffer = CVPixelBufferRetain(srcPix);
     } else {
-        if (_lastPixelBuffer) {
-            srcPix = CVPixelBufferRetain(_lastPixelBuffer);
-        }
+        if (_lastPixelBuffer) { srcPix = CVPixelBufferRetain(_lastPixelBuffer); }
     }
 
     if (srcPix) {
+        // 🌟 借尸还魂：保留真机 EXIF，仅替换像素
         CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (dstPix && self.pixelTransferSession) VTPixelTransferSessionTransferImage(self.pixelTransferSession, srcPix, dstPix);
         CVPixelBufferRelease(srcPix); 
@@ -284,11 +345,7 @@ static NSString *g_fakeLocale = nil;
 
 - (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
     if (g_envSpoofingEnabled && locations.count > 0) {
-        double jitterLat = (arc4random_uniform(100) - 50) / 1000000.0;
-        double jitterLon = (arc4random_uniform(100) - 50) / 1000000.0;
-        CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat + jitterLat, g_fakeLon + jitterLon);
-        CLLocation *fakeLoc = [[CLLocation alloc] initWithCoordinate:c altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
-        if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:@[fakeLoc]];
+        if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:@[generatePerfectFakeLocation()]];
     } else {
         if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:locations];
     }
@@ -296,11 +353,8 @@ static NSString *g_fakeLocale = nil;
 
 - (void)locationManager:(CLLocationManager *)manager didUpdateToLocation:(CLLocation *)newLocation fromLocation:(CLLocation *)oldLocation {
     if (g_envSpoofingEnabled && newLocation) {
-        double jitterLat = (arc4random_uniform(100) - 50) / 1000000.0;
-        double jitterLon = (arc4random_uniform(100) - 50) / 1000000.0;
-        CLLocation *fakeLoc = [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(g_fakeLat + jitterLat, g_fakeLon + jitterLon) altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
         if ([self.target respondsToSelector:_cmd]) {
-            [self.target locationManager:manager didUpdateToLocation:fakeLoc fromLocation:oldLocation];
+            [self.target locationManager:manager didUpdateToLocation:generatePerfectFakeLocation() fromLocation:oldLocation];
         }
     } else {
         if ([self.target respondsToSelector:_cmd]) {
@@ -311,7 +365,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【5. HUD 控制面板 (视频渲染)】
+// 【5. HUD 控制面板 (视频洗稿与渲染)】
 // ============================================================================
 @implementation AVCaptureHUDWindow { 
     UILabel *_statusLabel; UISwitch *_powerSwitch; NSInteger _pendingSlot; AVSampleBufferDisplayLayer *_previewLayer; 
@@ -349,7 +403,7 @@ static NSString *g_fakeLocale = nil;
     _brightSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 280, 220, 20)]; _brightSlider.minimumValue = -0.2; _brightSlider.maximumValue = 0.2; _brightSlider.value = 0.0; [self addSubview:_brightSlider];
     
     UILabel *cLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 320, 40, 20)]; cLabel.text = @"对比"; cLabel.textColor = [UIColor lightGrayColor]; cLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:cLabel];
-    _contrastSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 320, 220, 20)]; _contrastSlider.minimumValue = 0.5; _contrastSlider.maximumValue = 1.5; _contrastSlider.value = 1.0; [self addSubview:_contrastSlider];
+    _contrastSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 320, 220, 20)]; _contrastSlider.minimumValue = 0.5; _maximumValue = 1.5; _contrastSlider.value = 1.0; [self addSubview:_contrastSlider];
     
     UILabel *sLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 360, 40, 20)]; sLabel.text = @"饱和"; sLabel.textColor = [UIColor lightGrayColor]; sLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:sLabel];
     _saturationSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 360, 220, 20)]; _saturationSlider.minimumValue = 0.0; _saturationSlider.maximumValue = 2.0; _saturationSlider.value = 1.0; [self addSubview:_saturationSlider];
@@ -373,7 +427,7 @@ static NSString *g_fakeLocale = nil;
         NSString *dest = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject] stringByAppendingPathComponent:[NSString stringWithFormat:@"test%ld.mp4", (long)self->_pendingSlot]]; 
         [[NSFileManager defaultManager] removeItemAtPath:dest error:nil]; 
         if (_colorSwitch.isOn) {
-            self->_statusLabel.text = @"⏳ 滤镜去重渲染中..."; self->_statusLabel.textColor = [UIColor orangeColor];
+            self->_statusLabel.text = @"⏳ 真机镜像洗稿中..."; self->_statusLabel.textColor = [UIColor orangeColor];
             CGFloat bVal = _brightSlider.value; CGFloat cVal = _contrastSlider.value; CGFloat sVal = _saturationSlider.value;
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{ 
                 [AVStreamPreprocessor processVideoAtURL:url toDestination:dest brightness:bVal contrast:cVal saturation:sVal completion:^(BOOL success, NSError *error) {
@@ -401,7 +455,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【6. 环境配置窗口 - 🌟 离线雷达探测修复版 (完美防空白)】
+// 【6. 环境配置窗口 - 离线雷达探测修复版 (完美防空白 & 热更新)】
 // ============================================================================
 @implementation AVCaptureMapWindow { 
     MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; 
@@ -411,9 +465,7 @@ static NSString *g_fakeLocale = nil;
 
 + (instancetype)sharedMap {
     static AVCaptureMapWindow *map = nil; static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        map = [[AVCaptureMapWindow alloc] initWithFrame:CGRectMake(10, 100, 310, 480)];
-    }); 
+    dispatch_once(&once, ^{ map = [[AVCaptureMapWindow alloc] initWithFrame:CGRectMake(10, 100, 310, 480)]; }); 
     return map;
 }
 
@@ -468,7 +520,6 @@ static NSString *g_fakeLocale = nil;
 - (void)setupUI {
     UIView *container = self.rootViewController.view;
     
-    // 🌟 核心修复：直接读取全局变量状态，防止界面渲染为空白
     _pendingLat = g_fakeLat != 0.0 ? g_fakeLat : 50.1109; 
     _pendingLon = g_fakeLon != 0.0 ? g_fakeLon : 8.6821;
     _pMCC = g_fakeMCC ?: @"262";
@@ -515,9 +566,8 @@ static NSString *g_fakeLocale = nil;
     _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n运营商: %@ (%@-%@)\n时区: %@ | 语言: %@", _pendingLat, _pendingLon, _pCarrier?:@"-", _pMCC?:@"-", _pMNC?:@"-", _pTZ?:@"-", _pLocale?:@"-"];
 }
 
-// 🌟 辅助方法：设置国家信息
 - (void)setFakeCountry:(NSString *)cc {
-    self->_pMCC = @"262"; self->_pMNC = @"01"; self->_pCarrier = @"Telekom.de"; self->_pTZ = @"Europe/Berlin"; self->_pLocale = @"de_DE"; // Default DE
+    self->_pMCC = @"262"; self->_pMNC = @"01"; self->_pCarrier = @"Telekom.de"; self->_pTZ = @"Europe/Berlin"; self->_pLocale = @"de_DE"; 
     if ([cc isEqualToString:@"us"]) { self->_pMCC = @"310"; self->_pMNC = @"410"; self->_pCarrier = @"AT&T"; self->_pTZ = @"America/New_York"; self->_pLocale = @"en_US"; }
     else if ([cc isEqualToString:@"fr"]) { self->_pMCC = @"208"; self->_pMNC = @"01"; self->_pCarrier = @"Orange F"; self->_pTZ = @"Europe/Paris"; self->_pLocale = @"fr_FR"; }
     else if ([cc isEqualToString:@"it"]) { self->_pMCC = @"222"; self->_pMNC = @"01"; self->_pCarrier = @"TIM"; self->_pTZ = @"Europe/Rome"; self->_pLocale = @"it_IT"; }
@@ -538,7 +588,6 @@ static NSString *g_fakeLocale = nil;
     CLGeocoder *geo = [[CLGeocoder alloc] init];
     [geo reverseGeocodeLocation:[[CLLocation alloc] initWithLatitude:c.latitude longitude:c.longitude] completionHandler:^(NSArray *pls, NSError *err) {
         dispatch_async(dispatch_get_main_queue(), ^{ 
-            // 🌟 核心修复：离线雷达匹配 (无论 VPN 是否拦截 Apple 服务，都能精准出结果)
             if (err || pls.count == 0) {
                 if (c.longitude < -60) { [self setFakeCountry:@"us"]; } 
                 else if (c.longitude > -5 && c.longitude < 8 && c.latitude < 51) { [self setFakeCountry:@"fr"]; } 
@@ -569,7 +618,6 @@ static NSString *g_fakeLocale = nil;
     if (_pLocale) [ud setObject:_pLocale forKey:@"avs_env_locale"];
     [ud synchronize];
     
-    // 热更新
     g_envSpoofingEnabled = _envSwitch.on;
     g_fakeLat = _pendingLat;
     g_fakeLon = _pendingLon;
@@ -593,7 +641,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【提前声明所有系统接口】
+// 【提前声明所有系统接口，杜绝严苛编译器的拦截报错】
 // ============================================================================
 @interface CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName;
@@ -606,7 +654,6 @@ static NSString *g_fakeLocale = nil;
 - (NSDictionary<NSString *,CTCarrier *> *)avs_serviceSubscriberCellularProviders;
 @end
 
-// 🌟 接口补充：加入强注定位声明
 @interface CLLocationManager (AVStreamHook)
 - (CLLocation *)avs_location;
 - (void)avs_setDelegate:(id<CLLocationManagerDelegate>)delegate;
@@ -643,7 +690,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【7. 系统底层 Hook 实现】
+// 【7. 系统底层 Hook 实现 (🌟 接入完美真机级 GPS 数据包)】
 // ============================================================================
 @implementation CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName { return g_envSpoofingEnabled && g_fakeCarrierName ? g_fakeCarrierName : [self avs_carrierName]; }
@@ -660,16 +707,9 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
-// 🌟 核心修复：强效拦截，主动推送定位
 @implementation CLLocationManager (AVStreamHook)
 - (CLLocation *)avs_location {
-    if (g_envSpoofingEnabled) { 
-        double jitterLat = (arc4random_uniform(100) - 50) / 1000000.0;
-        double jitterLon = (arc4random_uniform(100) - 50) / 1000000.0;
-        double jitterAlt = (arc4random_uniform(100) - 50) / 10.0;
-        CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat + jitterLat, g_fakeLon + jitterLon);
-        return [[CLLocation alloc] initWithCoordinate:c altitude:(120.0 + jitterAlt) horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]]; 
-    }
+    if (g_envSpoofingEnabled) { return generatePerfectFakeLocation(); } // 🌟 挂载全真 GPS 引擎
     return [self avs_location];
 }
 
@@ -684,12 +724,9 @@ static NSString *g_fakeLocale = nil;
 - (void)avs_startUpdatingLocation {
     [self avs_startUpdatingLocation]; 
     if (g_envSpoofingEnabled && self.delegate) {
-        double jLat = (arc4random_uniform(100) - 50) / 1000000.0;
-        double jLon = (arc4random_uniform(100) - 50) / 1000000.0;
-        CLLocation *fake = [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(g_fakeLat + jLat, g_fakeLon + jLon) altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if ([self.delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
-                [self.delegate locationManager:self didUpdateLocations:@[fake]];
+                [self.delegate locationManager:self didUpdateLocations:@[generatePerfectFakeLocation()]];
             }
         });
     }
@@ -698,12 +735,9 @@ static NSString *g_fakeLocale = nil;
 - (void)avs_requestLocation {
     [self avs_requestLocation];
     if (g_envSpoofingEnabled && self.delegate) {
-        double jLat = (arc4random_uniform(100) - 50) / 1000000.0;
-        double jLon = (arc4random_uniform(100) - 50) / 1000000.0;
-        CLLocation *fake = [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(g_fakeLat + jLat, g_fakeLon + jLon) altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if ([self.delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
-                [self.delegate locationManager:self didUpdateLocations:@[fake]];
+                [self.delegate locationManager:self didUpdateLocations:@[generatePerfectFakeLocation()]];
             }
         });
     }
