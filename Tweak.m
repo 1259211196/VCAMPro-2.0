@@ -18,7 +18,7 @@
 #pragma clang diagnostic ignored "-Wavailability"
 
 // ============================================================================
-// 【0. 极致安全的 C 语言静态缓存 (杜绝启动死锁)】
+// 【0. 极致安全的 C 语言静态缓存 (仅在启动时读取，运行中绝不突变)】
 // ============================================================================
 static BOOL g_envSpoofingEnabled = NO;
 static double g_fakeLat = 0.0;
@@ -31,7 +31,7 @@ static NSString *g_fakeTZ = nil;
 static NSString *g_fakeLocale = nil;
 
 // ============================================================================
-// 【1. 伪装系统大管家 (类名已混淆伪装)】
+// 【1. 伪装系统大管家 (类名已混淆)】
 // ============================================================================
 @class AVCaptureHUDWindow, AVCaptureMapWindow, AVStreamCoreProcessor;
 
@@ -44,7 +44,6 @@ static NSString *g_fakeLocale = nil;
 @property (nonatomic, strong) AVStreamCoreProcessor *processor;
 
 - (void)updateDisplayLayers;
-- (void)saveEnvironmentSettings;
 @end
 
 @interface AVCaptureHUDWindow : UIWindow <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
@@ -191,24 +190,10 @@ static NSString *g_fakeLocale = nil;
     }
 }
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer { return YES; }
-
-- (void)saveEnvironmentSettings {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults setBool:g_envSpoofingEnabled forKey:@"avs_env_enabled"];
-    [defaults setDouble:g_fakeLat forKey:@"avs_env_lat"];
-    [defaults setDouble:g_fakeLon forKey:@"avs_env_lon"];
-    if (g_fakeMCC) [defaults setObject:g_fakeMCC forKey:@"avs_env_mcc"];
-    if (g_fakeMNC) [defaults setObject:g_fakeMNC forKey:@"avs_env_mnc"];
-    if (g_fakeISO) [defaults setObject:g_fakeISO forKey:@"avs_env_iso"];
-    if (g_fakeCarrierName) [defaults setObject:g_fakeCarrierName forKey:@"avs_env_carrier"];
-    if (g_fakeTZ) [defaults setObject:g_fakeTZ forKey:@"avs_env_tz"];
-    if (g_fakeLocale) [defaults setObject:g_fakeLocale forKey:@"avs_env_locale"];
-    [defaults synchronize];
-}
 @end
 
 // ============================================================================
-// 【4. 隐形环境伪装代理 (拦截视频与GPS)】
+// 【4. 隐形环境伪装代理】
 // ============================================================================
 @interface AVCameraSessionProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureDataOutputSynchronizerDelegate, AVCaptureMetadataOutputObjectsDelegate, CLLocationManagerDelegate>
 @property (nonatomic, weak) id target;
@@ -244,7 +229,6 @@ static NSString *g_fakeLocale = nil;
 }
 - (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
     if (g_envSpoofingEnabled && locations.count > 0) {
-        // 🌟 终极防封：被动回调加入真实物理抖动
         double jitterLat = (arc4random_uniform(100) - 50) / 1000000.0;
         double jitterLon = (arc4random_uniform(100) - 50) / 1000000.0;
         double jitterAlt = (arc4random_uniform(100) - 50) / 10.0;
@@ -258,7 +242,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【5. HUD 控制面板 (色彩过滤与去重)】
+// 【5. HUD 控制面板 (视频渲染)】
 // ============================================================================
 @implementation AVCaptureHUDWindow { 
     UILabel *_statusLabel; UISwitch *_powerSwitch; NSInteger _pendingSlot; AVSampleBufferDisplayLayer *_previewLayer; 
@@ -351,9 +335,16 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【6. 地图标记与基站解析面板】
+// 【6. 延迟激活架构：地图标记与基站解析面板】
 // ============================================================================
-@implementation AVCaptureMapWindow { MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; }
+@implementation AVCaptureMapWindow { 
+    MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; 
+    
+    // 🌟 独立预备缓存：选点过程绝不直接修改系统环境
+    double _pendingLat; double _pendingLon;
+    NSString *_pendingMCC; NSString *_pendingMNC; NSString *_pendingISO;
+    NSString *_pendingCarrier; NSString *_pendingTZ; NSString *_pendingLocale;
+}
 + (instancetype)sharedMap {
     static AVCaptureMapWindow *map = nil; static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -365,7 +356,16 @@ static NSString *g_fakeLocale = nil;
 - (instancetype)initWithWindowScene:(UIWindowScene *)windowScene { if (self = [super initWithWindowScene:windowScene]) { [self setupUI]; } return self; }
 - (void)setupUI {
     self.windowLevel = UIWindowLevelStatusBar + 110; self.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95]; self.layer.cornerRadius = 16; self.layer.masksToBounds = YES; self.hidden = YES;
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 200, 20)]; title.text = @"🌍 全球定位与基站伪装"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16]; [self addSubview:title];
+    
+    // 赋予独立视图控制器以支持弹窗
+    self.rootViewController = [[UIViewController alloc] init];
+    
+    // 载入当前真实的底层状态到预备缓存中
+    _pendingLat = g_fakeLat; _pendingLon = g_fakeLon;
+    _pendingMCC = g_fakeMCC; _pendingMNC = g_fakeMNC; _pendingISO = g_fakeISO;
+    _pendingCarrier = g_fakeCarrierName; _pendingTZ = g_fakeTZ; _pendingLocale = g_fakeLocale;
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 200, 20)]; title.text = @"🌍 环境配置 (需重启生效)"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16]; [self addSubview:title];
     
     _envSwitch = [[UISwitch alloc] init]; _envSwitch.transform = CGAffineTransformMakeScale(0.8, 0.8); _envSwitch.frame = CGRectMake(240, 7, 50, 31);
     _envSwitch.on = g_envSpoofingEnabled;
@@ -376,21 +376,17 @@ static NSString *g_fakeLocale = nil;
     
     _infoLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 305, 276, 40)]; _infoLabel.numberOfLines = 2; _infoLabel.textColor = [UIColor greenColor]; _infoLabel.font = [UIFont systemFontOfSize:12]; _infoLabel.textAlignment = NSTextAlignmentCenter; [self updateInfoLabel]; [self addSubview:_infoLabel];
     
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem]; closeBtn.frame = CGRectMake(12, 350, 276, 38); closeBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; closeBtn.layer.cornerRadius = 8; [closeBtn setTitle:@"保存并关闭" forState:UIControlStateNormal]; [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16]; [closeBtn addTarget:self action:@selector(closeMap) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:closeBtn];
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem]; closeBtn.frame = CGRectMake(12, 350, 276, 38); closeBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; closeBtn.layer.cornerRadius = 8; [closeBtn setTitle:@"保存并应用 (重启生效)" forState:UIControlStateNormal]; [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16]; [closeBtn addTarget:self action:@selector(closeMap) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:closeBtn];
     
-    CLLocationCoordinate2D initialCoord = CLLocationCoordinate2DMake(g_fakeLat, g_fakeLon);
-    if (g_fakeLat == 0 && g_fakeLon == 0) initialCoord = CLLocationCoordinate2DMake(50.1109, 8.6821); 
+    CLLocationCoordinate2D initialCoord = CLLocationCoordinate2DMake(_pendingLat, _pendingLon);
+    if (_pendingLat == 0 && _pendingLon == 0) initialCoord = CLLocationCoordinate2DMake(50.1109, 8.6821); 
     MKCoordinateRegion region = MKCoordinateRegionMake(initialCoord, MKCoordinateSpanMake(5.0, 5.0));
     [_mapView setRegion:region animated:NO];
     MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init]; annotation.coordinate = initialCoord; [_mapView addAnnotation:annotation];
 }
-- (void)toggleEnvSpoofing:(UISwitch *)sender { 
-    g_envSpoofingEnabled = sender.isOn; 
-    [[AVStreamManager sharedManager] saveEnvironmentSettings]; 
-    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; 
-}
+- (void)toggleEnvSpoofing:(UISwitch *)sender { UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
 - (void)updateInfoLabel {
-    _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n基站: %@ (%@-%@)", g_fakeLat, g_fakeLon, g_fakeCarrierName, g_fakeMCC, g_fakeMNC];
+    _infoLabel.text = [NSString stringWithFormat:@"预设坐标: %.4f, %.4f\n预设基站: %@ (%@-%@)", _pendingLat, _pendingLon, _pendingCarrier ?: @"未设定", _pendingMCC ?: @"-", _pendingMNC ?: @"-"];
 }
 - (void)addPinToMap:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateBegan) return;
@@ -398,11 +394,11 @@ static NSString *g_fakeLocale = nil;
     CLLocationCoordinate2D coord = [_mapView convertPoint:touchPoint toCoordinateFromView:_mapView];
     [_mapView removeAnnotations:_mapView.annotations]; MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init]; annotation.coordinate = coord; [_mapView addAnnotation:annotation];
     
-    g_fakeLat = coord.latitude;
-    g_fakeLon = coord.longitude;
+    _pendingLat = coord.latitude;
+    _pendingLon = coord.longitude;
     
     CLLocation *location = [[CLLocation alloc] initWithLatitude:coord.latitude longitude:coord.longitude];
-    CLGeocoder *geocoder = [[CLGeocoder alloc] init]; _infoLabel.text = @"⏳ 正在解析该国家基站与时区信息...";
+    CLGeocoder *geocoder = [[CLGeocoder alloc] init]; _infoLabel.text = @"⏳ 正在解析该国家基站与时区...";
     
     [geocoder reverseGeocodeLocation:location completionHandler:^(NSArray<CLPlacemark *> * _Nullable placemarks, NSError * _Nullable error) {
         if (placemarks.count > 0) {
@@ -415,18 +411,41 @@ static NSString *g_fakeLocale = nil;
             else if ([countryCode isEqualToString:@"fr"]) { mcc = @"208"; mnc = @"01"; carrier = @"Orange F"; timezone = @"Europe/Paris"; locale = @"fr_FR"; }
             else if ([countryCode isEqualToString:@"it"]) { mcc = @"222"; mnc = @"01"; carrier = @"TIM"; timezone = @"Europe/Rome"; locale = @"it_IT"; }
             
-            g_fakeMCC = mcc; g_fakeMNC = mnc; g_fakeISO = countryCode; g_fakeCarrierName = carrier;
-            g_fakeTZ = timezone; g_fakeLocale = locale;
+            self->_pendingMCC = mcc; self->_pendingMNC = mnc; self->_pendingISO = countryCode; self->_pendingCarrier = carrier;
+            self->_pendingTZ = timezone; self->_pendingLocale = locale;
         }
-        [[AVStreamManager sharedManager] saveEnvironmentSettings]; [self updateInfoLabel];
+        [self updateInfoLabel];
         UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred];
     }];
 }
-- (void)closeMap { self.hidden = YES; [[AVStreamManager sharedManager] saveEnvironmentSettings]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred]; }
+- (void)closeMap { 
+    // 🌟 核心逻辑：仅将预设保存到系统本地，绝对不修改正在运行的 g_ 内存变量，杜绝瞬移！
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:_envSwitch.isOn forKey:@"avs_env_enabled"];
+    [defaults setDouble:_pendingLat forKey:@"avs_env_lat"];
+    [defaults setDouble:_pendingLon forKey:@"avs_env_lon"];
+    if (_pendingMCC) [defaults setObject:_pendingMCC forKey:@"avs_env_mcc"];
+    if (_pendingMNC) [defaults setObject:_pendingMNC forKey:@"avs_env_mnc"];
+    if (_pendingISO) [defaults setObject:_pendingISO forKey:@"avs_env_iso"];
+    if (_pendingCarrier) [defaults setObject:_pendingCarrier forKey:@"avs_env_carrier"];
+    if (_pendingTZ) [defaults setObject:_pendingTZ forKey:@"avs_env_tz"];
+    if (_pendingLocale) [defaults setObject:_pendingLocale forKey:@"avs_env_locale"];
+    [defaults synchronize]; 
+
+    // 🌟 强行打断，要求用户自行杀进程重启
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"环境配置已保存" message:@"为防止运行中途环境突变被风控系统捕捉（瞬移作弊），请【立即上滑划掉】彻底关闭本APP。下次打开时，伪装环境将从最底层安全加载！" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"我知道了，现在去关闭" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        self.hidden = YES;
+    }];
+    [alert addAction:okAction];
+    
+    [self.rootViewController presentViewController:alert animated:YES completion:nil];
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred]; 
+}
 @end
 
 // ============================================================================
-// 【7. 彻底断开死锁：全栈安全底层 Hook (完全读取静态内存)】
+// 【7. 全栈安全底层 Hook (只认静态内存，绝对稳定)】
 // ============================================================================
 @implementation CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName { return g_envSpoofingEnabled && g_fakeCarrierName ? g_fakeCarrierName : [self avs_carrierName]; }
@@ -443,7 +462,6 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
-// 🌟 终极防封：主动调用时加入真实物理抖动
 @implementation CLLocationManager (AVStreamHook)
 - (CLLocation *)avs_location {
     if (g_envSpoofingEnabled) { 
@@ -468,7 +486,6 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
-// 🌟 终极防封：同时伪装首选语言列表，堵死输入法检测
 @implementation NSLocale (AVStreamHook)
 + (NSLocale *)avs_currentLocale {
     if (g_envSpoofingEnabled && g_fakeLocale) { return [NSLocale localeWithLocaleIdentifier:g_fakeLocale]; }
@@ -540,34 +557,21 @@ static NSString *g_fakeLocale = nil;
 @end
 @implementation AVStreamLoader
 + (void)load {
-    // 🌟 首次启动硬核锁定（出厂默认开启德国法兰克福完美环境）
+    // 🌟 完全尊重用户意愿：首次启动不默认环境。仅当用户设置过才装载环境！
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    if ([defaults objectForKey:@"avs_env_enabled"] == nil) {
-        g_envSpoofingEnabled = YES;
-        g_fakeLat = 50.1109; g_fakeLon = 8.6821; 
-        g_fakeMCC = @"262"; g_fakeMNC = @"01"; g_fakeISO = @"de"; g_fakeCarrierName = @"Telekom.de";
-        g_fakeTZ = @"Europe/Berlin"; g_fakeLocale = @"de_DE";
-        
-        [defaults setBool:YES forKey:@"avs_env_enabled"];
-        [defaults setDouble:50.1109 forKey:@"avs_env_lat"];
-        [defaults setDouble:8.6821 forKey:@"avs_env_lon"];
-        [defaults setObject:@"262" forKey:@"avs_env_mcc"];
-        [defaults setObject:@"01" forKey:@"avs_env_mnc"];
-        [defaults setObject:@"de" forKey:@"avs_env_iso"];
-        [defaults setObject:@"Telekom.de" forKey:@"avs_env_carrier"];
-        [defaults setObject:@"Europe/Berlin" forKey:@"avs_env_tz"];
-        [defaults setObject:@"de_DE" forKey:@"avs_env_locale"];
-        [defaults synchronize];
-    } else {
+    if ([defaults objectForKey:@"avs_env_enabled"] != nil) {
         g_envSpoofingEnabled = [defaults boolForKey:@"avs_env_enabled"];
         g_fakeLat = [defaults doubleForKey:@"avs_env_lat"];
         g_fakeLon = [defaults doubleForKey:@"avs_env_lon"];
-        g_fakeMCC = [defaults stringForKey:@"avs_env_mcc"] ?: @"262";
-        g_fakeMNC = [defaults stringForKey:@"avs_env_mnc"] ?: @"01";
-        g_fakeISO = [defaults stringForKey:@"avs_env_iso"] ?: @"de";
-        g_fakeCarrierName = [defaults stringForKey:@"avs_env_carrier"] ?: @"Telekom.de";
-        g_fakeTZ = [defaults stringForKey:@"avs_env_tz"] ?: @"Europe/Berlin";
-        g_fakeLocale = [defaults stringForKey:@"avs_env_locale"] ?: @"de_DE";
+        g_fakeMCC = [defaults stringForKey:@"avs_env_mcc"];
+        g_fakeMNC = [defaults stringForKey:@"avs_env_mnc"];
+        g_fakeISO = [defaults stringForKey:@"avs_env_iso"];
+        g_fakeCarrierName = [defaults stringForKey:@"avs_env_carrier"];
+        g_fakeTZ = [defaults stringForKey:@"avs_env_tz"];
+        g_fakeLocale = [defaults stringForKey:@"avs_env_locale"];
+    } else {
+        // 第一次启动，一律白板，绝不发生自动跨国偏移
+        g_envSpoofingEnabled = NO;
     }
 
     dlopen("/System/Library/Frameworks/MapKit.framework/MapKit", RTLD_NOW);
@@ -605,7 +609,6 @@ static NSString *g_fakeLocale = nil;
     Class loclClass = NSClassFromString(@"NSLocale");
     if (loclClass) {
         method_exchangeImplementations(class_getClassMethod(loclClass, @selector(currentLocale)), class_getClassMethod(loclClass, @selector(avs_currentLocale)));
-        // 🌟 终极防泄漏补丁：封堵键盘首选语言
         method_exchangeImplementations(class_getClassMethod(loclClass, @selector(preferredLanguages)), class_getClassMethod(loclClass, @selector(avs_preferredLanguages)));
     }
 }
