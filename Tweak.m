@@ -11,7 +11,6 @@
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <dlfcn.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
@@ -133,23 +132,36 @@ static NSString *g_fakeLocale = nil;
 @property (nonatomic, strong) NSLock *decoderLock;
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer;
 - (void)processDepthBuffer:(AVDepthData *)depthData;
+- (void)loadVideoForCurrentSlot:(NSInteger)slot;
 @end
+
 @implementation AVStreamCoreProcessor
 - (instancetype)init {
     if (self = [super init]) {
         _decoderLock = [[NSLock alloc] init];
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_pixelTransferSession);
         if (_pixelTransferSession) VTSessionSetProperty(_pixelTransferSession, kVTPixelTransferPropertyKey_ScalingMode, kVTScalingMode_CropSourceToCleanAperture);
-        [self loadVideoForCurrentSlot];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(loadVideoForCurrentSlot) name:@"AVSChannelDidChangeNotification" object:nil];
+        
+        // 🌟 修复 1：移除这里的 loadVideoForCurrentSlot 调用，打破死锁闭环
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleChannelChange:) name:@"AVSChannelDidChangeNotification" object:nil];
     }
     return self;
 }
-- (void)loadVideoForCurrentSlot {
+
+// 🌟 修复 1：改造加载方法，接收参数解耦
+- (void)loadVideoForCurrentSlot:(NSInteger)slot {
     NSString *docPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    NSString *videoPath = [docPath stringByAppendingPathComponent:[NSString stringWithFormat:@"test%ld.mp4", (long)[AVStreamManager sharedManager].currentSlot]];
-    [self.decoderLock lock]; self.decoder = [[AVStreamDecoder alloc] initWithVideoPath:videoPath]; [self.decoderLock unlock];
+    NSString *videoPath = [docPath stringByAppendingPathComponent:[NSString stringWithFormat:@"test%ld.mp4", (long)slot]];
+    [self.decoderLock lock]; 
+    self.decoder = [[AVStreamDecoder alloc] initWithVideoPath:videoPath]; 
+    [self.decoderLock unlock];
 }
+
+// 🌟 修复 1：安全的通知处理
+- (void)handleChannelChange:(NSNotification *)note {
+    [self loadVideoForCurrentSlot:[AVStreamManager sharedManager].currentSlot];
+}
+
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer {
     if (![AVStreamManager sharedManager].isEnabled) return;
     [self.decoderLock lock]; CVPixelBufferRef srcPix = [self.decoder copyNextPixelBuffer]; [self.decoderLock unlock];
@@ -175,7 +187,15 @@ static NSString *g_fakeLocale = nil;
 + (instancetype)sharedManager {
     static AVStreamManager *mgr = nil; static dispatch_once_t once;
     dispatch_once(&once, ^{ 
-        mgr = [[AVStreamManager alloc] init]; mgr.isEnabled = YES; mgr.isHUDVisible = NO; mgr.currentSlot = 1; mgr.displayLayers = [NSHashTable weakObjectsHashTable]; mgr.processor = [[AVStreamCoreProcessor alloc] init]; 
+        mgr = [[AVStreamManager alloc] init]; 
+        mgr.isEnabled = YES; 
+        mgr.isHUDVisible = NO; 
+        mgr.currentSlot = 1; 
+        mgr.displayLayers = [NSHashTable weakObjectsHashTable]; 
+        mgr.processor = [[AVStreamCoreProcessor alloc] init]; 
+        
+        // 🌟 修复 1：在 Manager 完成初始化分配后，主动推入参数加载视频
+        [mgr.processor loadVideoForCurrentSlot:mgr.currentSlot];
     });
     return mgr;
 }
@@ -199,10 +219,25 @@ static NSString *g_fakeLocale = nil;
 @property (nonatomic, weak) id target;
 + (instancetype)proxyWithTarget:(id)target;
 @end
+
 @implementation AVCameraSessionProxy
 + (instancetype)proxyWithTarget:(id)target { AVCameraSessionProxy *proxy = [AVCameraSessionProxy alloc]; proxy.target = target; return proxy; }
-- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { NSMethodSignature *sig = [self.target methodSignatureForSelector:sel]; if (!sig) sig = [NSMethodSignature signatureWithObjCTypes:"v@:"]; return sig; }
-- (void)forwardInvocation:(NSInvocation *)invocation { if (self.target && [self.target respondsToSelector:invocation.selector]) [invocation invokeWithTarget:self.target]; }
+
+// 🌟 修复 2：彻底解决野指针导致的 Crash，使用真实签名
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { 
+    return [self.target methodSignatureForSelector:sel]; 
+}
+
+// 🌟 修复 2：安全转发，未实现的方法置空返回
+- (void)forwardInvocation:(NSInvocation *)invocation { 
+    if (self.target && [self.target respondsToSelector:invocation.selector]) {
+        [invocation invokeWithTarget:self.target]; 
+    } else {
+        void *nullPointer = NULL;
+        [invocation setReturnValue:&nullPointer];
+    }
+}
+
 - (BOOL)respondsToSelector:(SEL)aSelector {
     if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) || aSelector == @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:) || aSelector == @selector(captureOutput:didOutputMetadataObjects:fromConnection:) || aSelector == @selector(locationManager:didUpdateLocations:)) return YES;
     return [self.target respondsToSelector:aSelector];
@@ -578,7 +613,7 @@ static NSString *g_fakeLocale = nil;
     [self avs_setupGestures];
 }
 
-// 🌟 双重保险：拦截 makeKeyAndVisible，防止 TikTok 不触发 becomeKeyWindow
+// 🌟 双重保险：拦截 makeKeyAndVisible
 - (void)avs_makeKeyAndVisible {
     [self avs_makeKeyAndVisible];
     [self avs_setupGestures];
@@ -640,10 +675,7 @@ static NSString *g_fakeLocale = nil;
         g_envSpoofingEnabled = NO;
     }
 
-    dlopen("/System/Library/Frameworks/MapKit.framework/MapKit", RTLD_NOW);
-    dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW);
-    dlopen("/System/Library/Frameworks/CoreLocation.framework/CoreLocation", RTLD_NOW);
-    dlopen("/System/Library/Frameworks/CoreTelephony.framework/CoreTelephony", RTLD_NOW);
+    // 🌟 修复 3：移除了无用的 dlopen 强加载，防止找不到 dylib 报错
     
     method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(becomeKeyWindow)), class_getInstanceMethod([UIWindow class], @selector(avs_becomeKeyWindow)));
     // 🌟 双重保证：注入时机覆盖面更广
