@@ -49,9 +49,9 @@ static NSString *g_fakeLocale = nil;
 + (instancetype)sharedHUD;
 @end
 
-@interface AVCaptureMapWindow : UIWindow <MKMapViewDelegate, UIGestureRecognizerDelegate> // 🌟 修复：手势代理
+@interface AVCaptureMapWindow : UIWindow <MKMapViewDelegate, UIGestureRecognizerDelegate>
 + (instancetype)sharedMap;
-- (void)showMapSecurely; // 🌟 修复：安全弹出方法
+- (void)showMapSecurely; 
 @end
 
 // ============================================================================
@@ -141,8 +141,6 @@ static NSString *g_fakeLocale = nil;
         _decoderLock = [[NSLock alloc] init];
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_pixelTransferSession);
         if (_pixelTransferSession) VTSessionSetProperty(_pixelTransferSession, kVTPixelTransferPropertyKey_ScalingMode, kVTScalingMode_CropSourceToCleanAperture);
-        
-        // 🌟 修复死锁：移除这里的自我加载，转由通知和 Manager 驱动
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleChannelChange:) name:@"AVSChannelDidChangeNotification" object:nil];
     }
     return self;
@@ -181,7 +179,7 @@ static NSString *g_fakeLocale = nil;
     static AVStreamManager *mgr = nil; static dispatch_once_t once;
     dispatch_once(&once, ^{ 
         mgr = [[AVStreamManager alloc] init]; mgr.isEnabled = YES; mgr.isHUDVisible = NO; mgr.currentSlot = 1; mgr.displayLayers = [NSHashTable weakObjectsHashTable]; mgr.processor = [[AVStreamCoreProcessor alloc] init]; 
-        [mgr.processor loadVideoForCurrentSlot:mgr.currentSlot]; // 🌟 安全加载
+        [mgr.processor loadVideoForCurrentSlot:mgr.currentSlot]; 
     });
     return mgr;
 }
@@ -199,7 +197,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【4. 隐形环境伪装代理 (修复野指针)】
+// 【4. 隐形环境伪装代理 (含双重补丁：野指针修复 + Legacy API 强拦截)】
 // ============================================================================
 @interface AVCameraSessionProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureDataOutputSynchronizerDelegate, AVCaptureMetadataOutputObjectsDelegate, CLLocationManagerDelegate>
 @property (nonatomic, weak) id target;
@@ -212,8 +210,15 @@ static NSString *g_fakeLocale = nil;
     if (self.target && [self.target respondsToSelector:invocation.selector]) { [invocation invokeWithTarget:self.target]; }
     else { void *nullPointer = NULL; [invocation setReturnValue:&nullPointer]; }
 }
+
+// 🌟 补丁 1：增加拦截旧版 Location API 的声明
 - (BOOL)respondsToSelector:(SEL)aSelector {
-    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) || aSelector == @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:) || aSelector == @selector(captureOutput:didOutputMetadataObjects:fromConnection:) || aSelector == @selector(locationManager:didUpdateLocations:)) return YES;
+    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) || 
+        aSelector == @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:) || 
+        aSelector == @selector(captureOutput:didOutputMetadataObjects:fromConnection:) || 
+        aSelector == @selector(locationManager:didUpdateLocations:) ||
+        aSelector == @selector(locationManager:didUpdateToLocation:fromLocation:)) // <--- 关键拦截点
+        return YES;
     return [self.target respondsToSelector:aSelector];
 }
 - (Class)class { return [self.target class]; }
@@ -240,12 +245,27 @@ static NSString *g_fakeLocale = nil;
     if (g_envSpoofingEnabled && locations.count > 0) {
         double jitterLat = (arc4random_uniform(100) - 50) / 1000000.0;
         double jitterLon = (arc4random_uniform(100) - 50) / 1000000.0;
-        double jitterAlt = (arc4random_uniform(100) - 50) / 10.0;
         CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat + jitterLat, g_fakeLon + jitterLon);
-        CLLocation *fakeLoc = [[CLLocation alloc] initWithCoordinate:c altitude:(120.0 + jitterAlt) horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
+        CLLocation *fakeLoc = [[CLLocation alloc] initWithCoordinate:c altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
         if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:@[fakeLoc]];
     } else {
         if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:locations];
+    }
+}
+
+// 🌟 补丁 1 的具体实现：彻底斩断旧版 API 定位后门
+- (void)locationManager:(CLLocationManager *)manager didUpdateToLocation:(CLLocation *)newLocation fromLocation:(CLLocation *)oldLocation {
+    if (g_envSpoofingEnabled && newLocation) {
+        double jitterLat = (arc4random_uniform(100) - 50) / 1000000.0;
+        double jitterLon = (arc4random_uniform(100) - 50) / 1000000.0;
+        CLLocation *fakeLoc = [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(g_fakeLat + jitterLat, g_fakeLon + jitterLon) altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
+        if ([self.target respondsToSelector:_cmd]) {
+            [self.target locationManager:manager didUpdateToLocation:fakeLoc fromLocation:oldLocation];
+        }
+    } else {
+        if ([self.target respondsToSelector:_cmd]) {
+            [self.target locationManager:manager didUpdateToLocation:newLocation fromLocation:oldLocation];
+        }
     }
 }
 @end
@@ -339,7 +359,6 @@ static NSString *g_fakeLocale = nil;
     [picker dismissViewControllerAnimated:YES completion:nil]; 
 }
 @end
-
 
 // ============================================================================
 // 【6. 环境配置窗口 - 终极触控防拦截与修复版】
@@ -482,6 +501,7 @@ static NSString *g_fakeLocale = nil;
     }];
 }
 
+// 🌟 补丁 2 具体实现：热更新机制，无需重启 App
 - (void)saveAndClose {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     [ud setBool:_envSwitch.on forKey:@"avs_env_enabled"];
@@ -494,8 +514,18 @@ static NSString *g_fakeLocale = nil;
     if (_pLocale) [ud setObject:_pLocale forKey:@"avs_env_locale"];
     [ud synchronize];
     
+    // 🌟 强行将最新的 UI 数据热载入底层全局内存，立刻锁死系统环境！
+    g_envSpoofingEnabled = _envSwitch.on;
+    g_fakeLat = _pendingLat;
+    g_fakeLon = _pendingLon;
+    if (_pMCC) g_fakeMCC = _pMCC;
+    if (_pMNC) g_fakeMNC = _pMNC;
+    if (_pCarrier) g_fakeCarrierName = _pCarrier;
+    if (_pTZ) g_fakeTZ = _pTZ;
+    if (_pLocale) g_fakeLocale = _pLocale;
+    
     [self makeKeyWindow];
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"请彻底上滑划掉 App 并重新打开，使底层伪装生效。" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"底层伪装参数已热更新生效！无需重启 App。" preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(id x){ self.hidden = YES; }]];
     [self.rootViewController presentViewController:a animated:YES completion:nil];
 }
@@ -508,7 +538,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【提前声明所有系统接口，杜绝严苛编译器的拦截报错 (找回丢失的接口)】
+// 【提前声明所有系统接口，杜绝严苛编译器的拦截报错】
 // ============================================================================
 @interface CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName;
@@ -650,7 +680,6 @@ static NSString *g_fakeLocale = nil;
 
 - (void)showMapPanel:(UIGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateRecognized) { 
-        // 🌟 核心：使用安全弹出机制
         [[AVCaptureMapWindow sharedMap] showMapSecurely];
         UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; 
         [feedback impactOccurred]; 
@@ -658,7 +687,6 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
-// 🌟 修复：找回用于 TikTok 高级同步流的 Hook
 @implementation AVCaptureVideoDataOutput (AVStreamHook)
 - (void)avs_setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"AVCameraSessionProxy")]) { 
@@ -688,7 +716,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【8. 加载入口 (找回丢失的全部 Hook 交换)】
+// 【8. 加载入口】
 // ============================================================================
 @interface AVStreamLoader : NSObject
 @end
