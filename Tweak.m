@@ -74,7 +74,7 @@ static CLLocation* generatePerfectFakeLocation(void) {
 @end
 
 // ============================================================================
-// 【2. 异步视频去重洗稿引擎 (🌟 核心优化 2：全量真机镜像注入)】
+// 【2. 异步视频去重洗稿引擎 (🌟 核心优化：GPU零损耗 & 强制镜像注入)】
 // ============================================================================
 @interface AVStreamPreprocessor : NSObject
 + (void)processVideoAtURL:(NSURL *)sourceURL toDestination:(NSString *)destPath brightness:(CGFloat)brightness contrast:(CGFloat)contrast saturation:(CGFloat)saturation completion:(void(^)(BOOL success, NSError *error))completion;
@@ -87,6 +87,12 @@ static CLLocation* generatePerfectFakeLocation(void) {
     if (!videoTrack) { if (completion) completion(NO, nil); return; }
 
     AVMutableVideoComposition *videoComposition = [AVMutableVideoComposition videoCompositionWithAsset:asset applyingCIFiltersWithHandler:^(AVAsynchronousCIImageFilteringRequest * _Nonnull request) {
+        // 🌟 性能极客优化：如果滑块完全没动，直接返回原画，跳过 GPU 渲染，极大提升速度！
+        if (brightness == 0.0 && contrast == 1.0 && saturation == 1.0) {
+            [request finishWithImage:request.sourceImage context:nil];
+            return;
+        }
+        
         CIFilter *colorFilter = [CIFilter filterWithName:@"CIColorControls"];
         [colorFilter setValue:request.sourceImage forKey:kCIInputImageKey];
         [colorFilter setValue:@(brightness) forKey:kCIInputBrightnessKey];
@@ -102,53 +108,27 @@ static CLLocation* generatePerfectFakeLocation(void) {
     exportSession.shouldOptimizeForNetworkUse = YES; 
 
     // ==========================================================
-    // 🌟 全量真机镜像注入与文件格式化 (清除 aweme 等标签)
+    // 🌟 全量真机镜像注入与文件格式化
     // ==========================================================
     NSMutableArray<AVMetadataItem *> *mirrorMetadata = [NSMutableArray array];
     
-    // 1. 获取底层真实主板代号 (如 iPhone14,2)
     struct utsname systemInfo;
     uname(&systemInfo);
     NSString *hardwareModel = [NSString stringWithCString:systemInfo.machine encoding:NSUTF8StringEncoding];
     UIDevice *currentDevice = [UIDevice currentDevice];
 
-    AVMutableMetadataItem *makeItem = [[AVMutableMetadataItem alloc] init];
-    makeItem.keySpace = AVMetadataKeySpaceCommon;
-    makeItem.key = AVMetadataCommonKeyMake;
-    makeItem.value = @"Apple";
-    [mirrorMetadata addObject:makeItem];
-    
-    AVMutableMetadataItem *modelItem = [[AVMutableMetadataItem alloc] init];
-    modelItem.keySpace = AVMetadataKeySpaceCommon;
-    modelItem.key = AVMetadataCommonKeyModel;
-    modelItem.value = hardwareModel; // 完美镜像真实硬件型号
-    [mirrorMetadata addObject:modelItem];
-    
-    AVMutableMetadataItem *swItem = [[AVMutableMetadataItem alloc] init];
-    swItem.keySpace = AVMetadataKeySpaceCommon;
-    swItem.key = AVMetadataCommonKeySoftware;
-    swItem.value = [NSString stringWithFormat:@"%@ %@", currentDevice.systemName, currentDevice.systemVersion];
-    [mirrorMetadata addObject:swItem];
-    
-    AVMutableMetadataItem *dateItem = [[AVMutableMetadataItem alloc] init];
-    dateItem.keySpace = AVMetadataKeySpaceCommon;
-    dateItem.key = AVMetadataCommonKeyCreationDate;
-    NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
-    dateItem.value = [formatter stringFromDate:[NSDate date]];
-    [mirrorMetadata addObject:dateItem];
+    AVMutableMetadataItem *makeItem = [[AVMutableMetadataItem alloc] init]; makeItem.keySpace = AVMetadataKeySpaceCommon; makeItem.key = AVMetadataCommonKeyMake; makeItem.value = @"Apple"; [mirrorMetadata addObject:makeItem];
+    AVMutableMetadataItem *modelItem = [[AVMutableMetadataItem alloc] init]; modelItem.keySpace = AVMetadataKeySpaceCommon; modelItem.key = AVMetadataCommonKeyModel; modelItem.value = hardwareModel; [mirrorMetadata addObject:modelItem];
+    AVMutableMetadataItem *swItem = [[AVMutableMetadataItem alloc] init]; swItem.keySpace = AVMetadataKeySpaceCommon; swItem.key = AVMetadataCommonKeySoftware; swItem.value = [NSString stringWithFormat:@"%@ %@", currentDevice.systemName, currentDevice.systemVersion]; [mirrorMetadata addObject:swItem];
+    AVMutableMetadataItem *dateItem = [[AVMutableMetadataItem alloc] init]; dateItem.keySpace = AVMetadataKeySpaceCommon; dateItem.key = AVMetadataCommonKeyCreationDate;
+    NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init]; dateItem.value = [formatter stringFromDate:[NSDate date]]; [mirrorMetadata addObject:dateItem];
 
-    // 2. 注入视频文件级的真实地理位置 EXIF (标准 ISO 6709 格式)
     if (g_envSpoofingEnabled && g_fakeLat != 0.0) {
-        AVMutableMetadataItem *locItem = [[AVMutableMetadataItem alloc] init];
-        locItem.keySpace = AVMetadataKeySpaceCommon;
-        locItem.key = AVMetadataCommonKeyLocation;
-        locItem.value = [NSString stringWithFormat:@"%+08.4f%+09.4f/", g_fakeLat, g_fakeLon]; 
-        [mirrorMetadata addObject:locItem];
+        AVMutableMetadataItem *locItem = [[AVMutableMetadataItem alloc] init]; locItem.keySpace = AVMetadataKeySpaceCommon; locItem.key = AVMetadataCommonKeyLocation;
+        locItem.value = [NSString stringWithFormat:@"%+08.4f%+09.4f/", g_fakeLat, g_fakeLon]; [mirrorMetadata addObject:locItem];
     }
 
-    // 强行覆盖容器，不留任何剪辑痕迹
     exportSession.metadata = mirrorMetadata;
-    // ==========================================================
 
     [exportSession exportAsynchronouslyWithCompletionHandler:^{
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -426,19 +406,36 @@ static CLLocation* generatePerfectFakeLocation(void) {
     if (url) { 
         NSString *dest = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject] stringByAppendingPathComponent:[NSString stringWithFormat:@"test%ld.mp4", (long)self->_pendingSlot]]; 
         [[NSFileManager defaultManager] removeItemAtPath:dest error:nil]; 
-        if (_colorSwitch.isOn) {
-            self->_statusLabel.text = @"⏳ 真机镜像洗稿中..."; self->_statusLabel.textColor = [UIColor orangeColor];
-            CGFloat bVal = _brightSlider.value; CGFloat cVal = _contrastSlider.value; CGFloat sVal = _saturationSlider.value;
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{ 
-                [AVStreamPreprocessor processVideoAtURL:url toDestination:dest brightness:bVal contrast:cVal saturation:sVal completion:^(BOOL success, NSError *error) {
-                    dispatch_async(dispatch_get_main_queue(), ^{ 
-                        if (success) { if ([AVStreamManager sharedManager].currentSlot == self->_pendingSlot) [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSChannelDidChangeNotification" object:nil]; 
-                            self->_statusLabel.text = [NSString stringWithFormat:@"🟢 V-Cam [CH %ld]", (long)[AVStreamManager sharedManager].currentSlot]; self->_statusLabel.textColor = [UIColor greenColor];
-                        } else { self->_statusLabel.text = @"❌ 去重渲染失败"; self->_statusLabel.textColor = [UIColor redColor]; } 
-                    });
-                }];
-            }); 
-        } else {
+        
+        // 🌟 核心防御：彻底废除危险的极速载入(直接复制)功能。
+        // 无论开关如何，强制执行重编码以抹除平台标签，注入真机灵魂！
+        self->_statusLabel.text = @"⏳ 真机镜像洗稿中..."; 
+        self->_statusLabel.textColor = [UIColor orangeColor];
+        
+        // 只有开启开关时，才读取滑块数值；未开启时传入 0.0/1.0/1.0 触发极致性能零损耗跳过
+        CGFloat bVal = _colorSwitch.isOn ? _brightSlider.value : 0.0; 
+        CGFloat cVal = _colorSwitch.isOn ? _contrastSlider.value : 1.0; 
+        CGFloat sVal = _colorSwitch.isOn ? _saturationSlider.value : 1.0;
+        
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{ 
+            [AVStreamPreprocessor processVideoAtURL:url toDestination:dest brightness:bVal contrast:cVal saturation:sVal completion:^(BOOL success, NSError *error) {
+                dispatch_async(dispatch_get_main_queue(), ^{ 
+                    if (success) { 
+                        if ([AVStreamManager sharedManager].currentSlot == self->_pendingSlot) {
+                            [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSChannelDidChangeNotification" object:nil]; 
+                        }
+                        self->_statusLabel.text = [NSString stringWithFormat:@"🟢 V-Cam [CH %ld]", (long)[AVStreamManager sharedManager].currentSlot]; 
+                        self->_statusLabel.textColor = [UIColor greenColor];
+                    } else { 
+                        self->_statusLabel.text = @"❌ 渲染与注入失败"; 
+                        self->_statusLabel.textColor = [UIColor redColor]; 
+                    } 
+                });
+            }];
+        }); 
+    } 
+    [picker dismissViewControllerAnimated:YES completion:nil]; 
+}
             self->_statusLabel.text = @"⚡️ 极速载入..."; 
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ 
                 BOOL success = [[NSFileManager defaultManager] copyItemAtURL:url toURL:[NSURL fileURLWithPath:dest] error:nil]; 
