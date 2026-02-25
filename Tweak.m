@@ -18,7 +18,7 @@
 #pragma clang diagnostic ignored "-Wavailability"
 
 // ============================================================================
-// 【0. 极致安全的 C 语言静态缓存 (仅在启动时读取，运行中绝不突变)】
+// 【0. 极致安全的 C 语言静态缓存 (杜绝启动死锁)】
 // ============================================================================
 static BOOL g_envSpoofingEnabled = NO;
 static double g_fakeLat = 0.0;
@@ -31,7 +31,7 @@ static NSString *g_fakeTZ = nil;
 static NSString *g_fakeLocale = nil;
 
 // ============================================================================
-// 【1. 伪装系统大管家 (类名已混淆)】
+// 【1. 伪装系统大管家 (类名已混淆伪装)】
 // ============================================================================
 @class AVCaptureHUDWindow, AVCaptureMapWindow, AVStreamCoreProcessor;
 
@@ -339,8 +339,6 @@ static NSString *g_fakeLocale = nil;
 // ============================================================================
 @implementation AVCaptureMapWindow { 
     MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; 
-    
-    // 🌟 独立预备缓存：选点过程绝不直接修改系统环境
     double _pendingLat; double _pendingLon;
     NSString *_pendingMCC; NSString *_pendingMNC; NSString *_pendingISO;
     NSString *_pendingCarrier; NSString *_pendingTZ; NSString *_pendingLocale;
@@ -356,11 +354,8 @@ static NSString *g_fakeLocale = nil;
 - (instancetype)initWithWindowScene:(UIWindowScene *)windowScene { if (self = [super initWithWindowScene:windowScene]) { [self setupUI]; } return self; }
 - (void)setupUI {
     self.windowLevel = UIWindowLevelStatusBar + 110; self.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95]; self.layer.cornerRadius = 16; self.layer.masksToBounds = YES; self.hidden = YES;
-    
-    // 赋予独立视图控制器以支持弹窗
     self.rootViewController = [[UIViewController alloc] init];
     
-    // 载入当前真实的底层状态到预备缓存中
     _pendingLat = g_fakeLat; _pendingLon = g_fakeLon;
     _pendingMCC = g_fakeMCC; _pendingMNC = g_fakeMNC; _pendingISO = g_fakeISO;
     _pendingCarrier = g_fakeCarrierName; _pendingTZ = g_fakeTZ; _pendingLocale = g_fakeLocale;
@@ -419,7 +414,6 @@ static NSString *g_fakeLocale = nil;
     }];
 }
 - (void)closeMap { 
-    // 🌟 核心逻辑：仅将预设保存到系统本地，绝对不修改正在运行的 g_ 内存变量，杜绝瞬移！
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:_envSwitch.isOn forKey:@"avs_env_enabled"];
     [defaults setDouble:_pendingLat forKey:@"avs_env_lat"];
@@ -432,7 +426,6 @@ static NSString *g_fakeLocale = nil;
     if (_pendingLocale) [defaults setObject:_pendingLocale forKey:@"avs_env_locale"];
     [defaults synchronize]; 
 
-    // 🌟 强行打断，要求用户自行杀进程重启
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"环境配置已保存" message:@"为防止运行中途环境突变被风控系统捕捉（瞬移作弊），请【立即上滑划掉】彻底关闭本APP。下次打开时，伪装环境将从最底层安全加载！" preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"我知道了，现在去关闭" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
         self.hidden = YES;
@@ -445,7 +438,52 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【7. 全栈安全底层 Hook (只认静态内存，绝对稳定)】
+// 【提前声明所有系统接口，杜绝严苛编译器的拦截报错】
+// ============================================================================
+@interface CTCarrier (AVStreamHook)
+- (NSString *)avs_carrierName;
+- (NSString *)avs_isoCountryCode;
+- (NSString *)avs_mobileCountryCode;
+- (NSString *)avs_mobileNetworkCode;
+@end
+
+@interface CTTelephonyNetworkInfo (AVStreamHook)
+- (NSDictionary<NSString *,CTCarrier *> *)avs_serviceSubscriberCellularProviders;
+@end
+
+@interface CLLocationManager (AVStreamHook)
+- (CLLocation *)avs_location;
+- (void)avs_setDelegate:(id<CLLocationManagerDelegate>)delegate;
+@end
+
+@interface NSTimeZone (AVStreamHook)
++ (NSTimeZone *)avs_systemTimeZone;
++ (NSTimeZone *)avs_defaultTimeZone;
+@end
+
+@interface NSLocale (AVStreamHook)
++ (NSLocale *)avs_currentLocale;
++ (NSArray<NSString *> *)avs_preferredLanguages;
+@end
+
+@interface UIWindow (AVStreamHook)
+- (void)avs_becomeKeyWindow;
+@end
+
+@interface AVCaptureVideoDataOutput (AVStreamHook)
+- (void)avs_setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue;
+@end
+
+@interface AVCaptureDataOutputSynchronizer (AVStreamHook)
+- (void)avs_setDelegate:(id)delegate queue:(dispatch_queue_t)queue;
+@end
+
+@interface AVCaptureMetadataOutput (AVStreamHook)
+- (void)avs_setMetadataObjectsDelegate:(id)delegate queue:(dispatch_queue_t)queue;
+@end
+
+// ============================================================================
+// 【7. 全栈安全底层 Hook (合并去重，只认静态内存，绝对稳定)】
 // ============================================================================
 @implementation CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName { return g_envSpoofingEnabled && g_fakeCarrierName ? g_fakeCarrierName : [self avs_carrierName]; }
@@ -473,6 +511,13 @@ static NSString *g_fakeLocale = nil;
     }
     return [self avs_location];
 }
+- (void)avs_setDelegate:(id<CLLocationManagerDelegate>)delegate {
+    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"AVCameraSessionProxy")]) { 
+        AVCameraSessionProxy *proxy = [AVCameraSessionProxy proxyWithTarget:delegate]; 
+        objc_setAssociatedObject(self, "_avs_loc_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); 
+        [self avs_setDelegate:(id<CLLocationManagerDelegate>)proxy];
+    } else { [self avs_setDelegate:delegate]; }
+}
 @end
 
 @implementation NSTimeZone (AVStreamHook)
@@ -497,9 +542,6 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
-// ============================================================================
-// 【8. 极致安全底层注册引擎 (+load)】
-// ============================================================================
 @implementation UIWindow (AVStreamHook)
 - (void)avs_becomeKeyWindow {
     [self avs_becomeKeyWindow];
@@ -543,34 +585,26 @@ static NSString *g_fakeLocale = nil;
     } else { [self avs_setMetadataObjectsDelegate:delegate queue:queue]; }
 }
 @end
-@implementation CLLocationManager (AVStreamHook)
-- (void)avs_setDelegate:(id<CLLocationManagerDelegate>)delegate {
-    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"AVCameraSessionProxy")]) { 
-        AVCameraSessionProxy *proxy = [AVCameraSessionProxy proxyWithTarget:delegate]; 
-        objc_setAssociatedObject(self, "_avs_loc_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); 
-        [self avs_setDelegate:(id<CLLocationManagerDelegate>)proxy];
-    } else { [self avs_setDelegate:delegate]; }
-}
-@end
 
+// ============================================================================
+// 【8. 极致安全底层注册引擎 (+load)】
+// ============================================================================
 @interface AVStreamLoader : NSObject
 @end
 @implementation AVStreamLoader
 + (void)load {
-    // 🌟 完全尊重用户意愿：首次启动不默认环境。仅当用户设置过才装载环境！
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     if ([defaults objectForKey:@"avs_env_enabled"] != nil) {
         g_envSpoofingEnabled = [defaults boolForKey:@"avs_env_enabled"];
         g_fakeLat = [defaults doubleForKey:@"avs_env_lat"];
         g_fakeLon = [defaults doubleForKey:@"avs_env_lon"];
-        g_fakeMCC = [defaults stringForKey:@"avs_env_mcc"];
-        g_fakeMNC = [defaults stringForKey:@"avs_env_mnc"];
-        g_fakeISO = [defaults stringForKey:@"avs_env_iso"];
-        g_fakeCarrierName = [defaults stringForKey:@"avs_env_carrier"];
-        g_fakeTZ = [defaults stringForKey:@"avs_env_tz"];
-        g_fakeLocale = [defaults stringForKey:@"avs_env_locale"];
+        g_fakeMCC = [defaults stringForKey:@"avs_env_mcc"] ?: @"262";
+        g_fakeMNC = [defaults stringForKey:@"avs_env_mnc"] ?: @"01";
+        g_fakeISO = [defaults stringForKey:@"avs_env_iso"] ?: @"de";
+        g_fakeCarrierName = [defaults stringForKey:@"avs_env_carrier"] ?: @"Telekom.de";
+        g_fakeTZ = [defaults stringForKey:@"avs_env_tz"] ?: @"Europe/Berlin";
+        g_fakeLocale = [defaults stringForKey:@"avs_env_locale"] ?: @"de_DE";
     } else {
-        // 第一次启动，一律白板，绝不发生自动跨国偏移
         g_envSpoofingEnabled = NO;
     }
 
