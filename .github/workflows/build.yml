@@ -1,4 +1,4 @@
-name: Build VCAM
+name: Build VCAM Dylib
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -18,18 +18,28 @@ jobs:
           rm -rf theos/sdks
           git clone https://github.com/theos/sdks.git theos/sdks
           
-      # 🌟 修复：加上 xz 压缩工具，防止 dpkg 打包失败
+      # 🌟 优化：既然不需要打包 deb，就不再需要安装 dpkg 和 xz，只保留 ldid 用于给 dylib 签名
       - name: Install Dependencies
-        run: brew install ldid dpkg xz
+        run: brew install ldid
           
-      - name: Build Tweak
+      - name: Build Tweak (Dylib Only)
         run: |
           export THEOS=${{ github.workspace }}/theos
-          # 🌟 加上 messages=yes，强行让 Theos 吐出所有打包日志
-          make package FINALPACKAGE=1 messages=yes
+          # 🌟 优化：将 'make package' 改为 'make'。这样 Theos 只会编译出双架构的 dylib，不会去执行耗时的打包操作
+          make FINALPACKAGE=1 messages=yes
+          
+      - name: Prepare Injection Artifacts
+        run: |
+          mkdir -p Dylib_Output
+          # 🌟 核心：从 Theos 的隐藏编译缓存目录中提取编译好的胖二进制 (Fat Binary) dylib
+          cp .theos/obj/VCAM.dylib Dylib_Output/
+          
+          # 提取对应的 plist 文件（如果你的项目根目录有 VCAM.plist）。
+          # 巨魔注入器通常需要这个 plist 文件来识别需要注入的 Bundle ID (如 com.zhiliaoapp.musically)
+          cp *.plist Dylib_Output/ 2>/dev/null || true
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VCAM-Package
-          path: packages/*.deb
+          name: VCAM-Injectable-Dylib
+          path: Dylib_Output/
