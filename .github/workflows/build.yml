@@ -18,21 +18,18 @@ jobs:
           rm -rf theos/sdks
           git clone https://github.com/theos/sdks.git theos/sdks
           
-      # 🌟 核心修复1：同时安装签名工具 ldid 和打包工具 dpkg
+      # 🌟 修复：加上 xz 压缩工具，防止 dpkg 打包失败
       - name: Install Dependencies
-        run: brew install ldid dpkg
+        run: brew install ldid dpkg xz
           
       - name: Build Tweak
         run: |
           export THEOS=${{ github.workspace }}/theos
-          make package FINALPACKAGE=1
+          # 🌟 加上 messages=yes，强行让 Theos 吐出所有打包日志
+          make package FINALPACKAGE=1 messages=yes
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: VCAM-Package
-          # 🌟 核心修复2：扩大搜索范围，只要生成了 .deb 就一定能抓到
-          path: |
-            *.deb
-            packages/*.deb
-            **/*.deb
+          path: packages/*.deb
