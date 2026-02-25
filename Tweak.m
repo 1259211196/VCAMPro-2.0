@@ -287,8 +287,6 @@ static NSString *g_fakeLocale = nil;
     @autoreleasepool { NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:metadataObjects.count]; BOOL shouldFilter = ([AVStreamManager sharedManager].isEnabled && [AVStreamManager sharedManager].isHUDVisible); for (AVMetadataObject *obj in metadataObjects) { if (shouldFilter && [obj.type isEqualToString:AVMetadataObjectTypeFace]) continue; [filtered addObject:obj]; } if ([self.target respondsToSelector:_cmd]) [self.target captureOutput:output didOutputMetadataObjects:filtered fromConnection:connection]; }
 }
 
-// 🌟 这里只需要做简单透传，因为我们已经 Hook 了 CLLocation 对象的内部属性
-// 无论传什么 Location 对象回去，App 读取其 coordinate 时都会拿到假数据
 - (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
     if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:locations];
 }
@@ -394,6 +392,7 @@ static NSString *g_fakeLocale = nil;
     MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; 
     double _pendingLat; double _pendingLon;
     NSString *_pMCC; NSString *_pMNC; NSString *_pCarrier; NSString *_pTZ; NSString *_pLocale;
+    NSString *_pISO; // 🌟 修复 1: 新增 ISO 国家代码缓存变量
 }
 + (instancetype)sharedMap { static AVCaptureMapWindow *map = nil; static dispatch_once_t once; dispatch_once(&once, ^{ map = [[AVCaptureMapWindow alloc] initWithFrame:CGRectMake(10, 100, 310, 480)]; }); return map; }
 - (instancetype)initWithFrame:(CGRect)f { if (self = [super initWithFrame:f]) { self.windowLevel = UIWindowLevelStatusBar + 110; self.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.98]; self.layer.cornerRadius = 16; self.layer.masksToBounds = YES; self.hidden = YES; self.userInteractionEnabled = YES; UIViewController *root = [[UIViewController alloc] init]; root.view.frame = self.bounds; root.view.userInteractionEnabled = YES; self.rootViewController = root; [self setupUI]; UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]; pan.delegate = self; [self addGestureRecognizer:pan]; } return self; }
@@ -403,7 +402,11 @@ static NSString *g_fakeLocale = nil;
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch { if ([touch.view isDescendantOfView:_mapView] || [touch.view isKindOfClass:[UIButton class]] || [touch.view isKindOfClass:[UISwitch class]]) { return NO; } return YES; }
 - (void)setupUI {
     UIView *container = self.rootViewController.view;
-    _pendingLat = g_fakeLat != 0.0 ? g_fakeLat : 50.1109; _pendingLon = g_fakeLon != 0.0 ? g_fakeLon : 8.6821; _pMCC = g_fakeMCC ?: @"262"; _pMNC = g_fakeMNC ?: @"01"; _pCarrier = g_fakeCarrierName ?: @"Telekom.de"; _pTZ = g_fakeTZ ?: @"Europe/Berlin"; _pLocale = g_fakeLocale ?: @"de_DE";
+    _pendingLat = g_fakeLat != 0.0 ? g_fakeLat : 50.1109; _pendingLon = g_fakeLon != 0.0 ? g_fakeLon : 8.6821; 
+    _pMCC = g_fakeMCC ?: @"262"; _pMNC = g_fakeMNC ?: @"01"; _pCarrier = g_fakeCarrierName ?: @"Telekom.de"; 
+    _pTZ = g_fakeTZ ?: @"Europe/Berlin"; _pLocale = g_fakeLocale ?: @"de_DE";
+    _pISO = g_fakeISO ?: @"de"; // 🌟 修复: 初始化 _pISO
+    
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 15, 200, 20)]; title.text = @"🌍 环境伪装配置"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16]; [container addSubview:title];
     _envSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(245, 10, 50, 30)]; _envSwitch.on = g_envSpoofingEnabled; [container addSubview:_envSwitch];
     _mapView = [[MKMapView alloc] initWithFrame:CGRectMake(12, 50, 286, 250)]; _mapView.layer.cornerRadius = 8; _mapView.delegate = self; _mapView.userInteractionEnabled = YES; 
@@ -414,11 +417,12 @@ static NSString *g_fakeLocale = nil;
 }
 - (void)updateLabel { _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n运营商: %@ (%@-%@)\n时区: %@ | 语言: %@", _pendingLat, _pendingLon, _pCarrier?:@"-", _pMCC?:@"-", _pMNC?:@"-", _pTZ?:@"-", _pLocale?:@"-"]; }
 - (void)setFakeCountry:(NSString *)cc {
-    self->_pMCC = @"262"; self->_pMNC = @"01"; self->_pCarrier = @"Telekom.de"; self->_pTZ = @"Europe/Berlin"; self->_pLocale = @"de_DE"; 
-    if ([cc isEqualToString:@"us"]) { self->_pMCC = @"310"; self->_pMNC = @"410"; self->_pCarrier = @"AT&T"; self->_pTZ = @"America/New_York"; self->_pLocale = @"en_US"; }
-    else if ([cc isEqualToString:@"fr"]) { self->_pMCC = @"208"; self->_pMNC = @"01"; self->_pCarrier = @"Orange F"; self->_pTZ = @"Europe/Paris"; self->_pLocale = @"fr_FR"; }
-    else if ([cc isEqualToString:@"it"]) { self->_pMCC = @"222"; self->_pMNC = @"01"; self->_pCarrier = @"TIM"; self->_pTZ = @"Europe/Rome"; self->_pLocale = @"it_IT"; }
-    else if ([cc isEqualToString:@"gb"]) { self->_pMCC = @"234"; self->_pMNC = @"15"; self->_pCarrier = @"Vodafone UK"; self->_pTZ = @"Europe/London"; self->_pLocale = @"en_GB"; }
+    // 🌟 修复 2: 在切换国家时一并更新 _pISO
+    self->_pMCC = @"262"; self->_pMNC = @"01"; self->_pCarrier = @"Telekom.de"; self->_pTZ = @"Europe/Berlin"; self->_pLocale = @"de_DE"; self->_pISO = @"de"; 
+    if ([cc isEqualToString:@"us"]) { self->_pMCC = @"310"; self->_pMNC = @"410"; self->_pCarrier = @"AT&T"; self->_pTZ = @"America/New_York"; self->_pLocale = @"en_US"; self->_pISO = @"us"; }
+    else if ([cc isEqualToString:@"fr"]) { self->_pMCC = @"208"; self->_pMNC = @"01"; self->_pCarrier = @"Orange F"; self->_pTZ = @"Europe/Paris"; self->_pLocale = @"fr_FR"; self->_pISO = @"fr"; }
+    else if ([cc isEqualToString:@"it"]) { self->_pMCC = @"222"; self->_pMNC = @"01"; self->_pCarrier = @"TIM"; self->_pTZ = @"Europe/Rome"; self->_pLocale = @"it_IT"; self->_pISO = @"it"; }
+    else if ([cc isEqualToString:@"gb"]) { self->_pMCC = @"234"; self->_pMNC = @"15"; self->_pCarrier = @"Vodafone UK"; self->_pTZ = @"Europe/London"; self->_pLocale = @"en_GB"; self->_pISO = @"gb"; }
 }
 - (void)dropPin:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
@@ -428,7 +432,6 @@ static NSString *g_fakeLocale = nil;
     MKPointAnnotation *ann = [[MKPointAnnotation alloc] init]; ann.coordinate = c; [_mapView addAnnotation:ann];
     _pendingLat = c.latitude; _pendingLon = c.longitude;
     
-    // 🌟 计算微小的随机偏移量，模拟真实定位漂移 (Drift)
     double jLat = (arc4random_uniform(200) - 100) / 10000000.0; 
     double jLon = (arc4random_uniform(200) - 100) / 10000000.0;
     g_driftLat = jLat; g_driftLon = jLon;
@@ -447,9 +450,23 @@ static NSString *g_fakeLocale = nil;
 }
 - (void)saveAndClose {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults]; [ud setBool:_envSwitch.on forKey:@"avs_env_enabled"]; [ud setDouble:_pendingLat forKey:@"avs_env_lat"]; [ud setDouble:_pendingLon forKey:@"avs_env_lon"];
-    if (_pMCC) [ud setObject:_pMCC forKey:@"avs_env_mcc"]; if (_pMNC) [ud setObject:_pMNC forKey:@"avs_env_mnc"]; if (_pCarrier) [ud setObject:_pCarrier forKey:@"avs_env_carrier"]; if (_pTZ) [ud setObject:_pTZ forKey:@"avs_env_tz"]; if (_pLocale) [ud setObject:_pLocale forKey:@"avs_env_locale"]; [ud synchronize];
+    if (_pMCC) [ud setObject:_pMCC forKey:@"avs_env_mcc"]; 
+    if (_pMNC) [ud setObject:_pMNC forKey:@"avs_env_mnc"]; 
+    if (_pCarrier) [ud setObject:_pCarrier forKey:@"avs_env_carrier"]; 
+    if (_pTZ) [ud setObject:_pTZ forKey:@"avs_env_tz"]; 
+    if (_pLocale) [ud setObject:_pLocale forKey:@"avs_env_locale"]; 
+    if (_pISO) [ud setObject:_pISO forKey:@"avs_env_iso"]; // 🌟 修复 3: 保存 ISO 配置到磁盘
+    
+    [ud synchronize];
+    
     g_envSpoofingEnabled = _envSwitch.on; g_fakeLat = _pendingLat; g_fakeLon = _pendingLon; 
-    if (_pMCC) g_fakeMCC = _pMCC; if (_pMNC) g_fakeMNC = _pMNC; if (_pCarrier) g_fakeCarrierName = _pCarrier; if (_pTZ) g_fakeTZ = _pTZ; if (_pLocale) g_fakeLocale = _pLocale;
+    if (_pMCC) g_fakeMCC = _pMCC; 
+    if (_pMNC) g_fakeMNC = _pMNC; 
+    if (_pCarrier) g_fakeCarrierName = _pCarrier; 
+    if (_pTZ) g_fakeTZ = _pTZ; 
+    if (_pLocale) g_fakeLocale = _pLocale;
+    if (_pISO) g_fakeISO = _pISO; // 🌟 修复 3: 热更新 ISO 内存缓存
+    
     [self makeKeyWindow]; UIAlertController *a = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"全系统级定位伪装已更新！" preferredStyle:UIAlertControllerStyleAlert]; [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(id x){ self.hidden = YES; }]]; [self.rootViewController presentViewController:a animated:YES completion:nil];
 }
 - (void)handlePan:(UIPanGestureRecognizer *)p { CGPoint t = [p translationInView:self]; self.center = CGPointMake(self.center.x+t.x, self.center.y+t.y); [p setTranslation:CGPointZero inView:self]; }
@@ -473,7 +490,7 @@ static NSString *g_fakeLocale = nil;
 - (void)avs_startUpdatingLocation;
 - (void)avs_requestLocation;
 @end
-@interface CLLocation (AVStreamHook) // 🌟 新增：CLLocation 对象级 Hook 声明
+@interface CLLocation (AVStreamHook)
 - (CLLocationCoordinate2D)avs_coordinate;
 - (CLLocationDistance)avs_altitude;
 - (CLLocationAccuracy)avs_horizontalAccuracy;
@@ -484,9 +501,11 @@ static NSString *g_fakeLocale = nil;
 @interface NSTimeZone (AVStreamHook)
 + (NSTimeZone *)avs_systemTimeZone;
 + (NSTimeZone *)avs_defaultTimeZone;
++ (NSTimeZone *)avs_localTimeZone; // 🌟 深层防御: 添加 localTimeZone 声明
 @end
 @interface NSLocale (AVStreamHook)
 + (NSLocale *)avs_currentLocale;
++ (NSLocale *)avs_autoupdatingCurrentLocale; // 🌟 深层防御: 添加 autoupdatingCurrentLocale 声明
 + (NSArray<NSString *> *)avs_preferredLanguages;
 @end
 @interface UIWindow (AVStreamHook)
@@ -521,7 +540,6 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
-// 🌟 核心升级：CLLocation 对象级属性劫持
 @implementation CLLocation (AVStreamHook)
 - (CLLocationCoordinate2D)avs_coordinate {
     if (g_envSpoofingEnabled && g_fakeLat != 0.0) {
@@ -583,9 +601,11 @@ static NSString *g_fakeLocale = nil;
 @implementation NSTimeZone (AVStreamHook)
 + (NSTimeZone *)avs_systemTimeZone { if (g_envSpoofingEnabled && g_fakeTZ) { NSTimeZone *tz = [NSTimeZone timeZoneWithName:g_fakeTZ]; if (tz) return tz; } return [self avs_systemTimeZone]; }
 + (NSTimeZone *)avs_defaultTimeZone { if (g_envSpoofingEnabled && g_fakeTZ) { NSTimeZone *tz = [NSTimeZone timeZoneWithName:g_fakeTZ]; if (tz) return tz; } return [self avs_defaultTimeZone]; }
++ (NSTimeZone *)avs_localTimeZone { if (g_envSpoofingEnabled && g_fakeTZ) { NSTimeZone *tz = [NSTimeZone timeZoneWithName:g_fakeTZ]; if (tz) return tz; } return [self avs_localTimeZone]; } // 🌟 深层防御
 @end
 @implementation NSLocale (AVStreamHook)
 + (NSLocale *)avs_currentLocale { if (g_envSpoofingEnabled && g_fakeLocale) { return [NSLocale localeWithLocaleIdentifier:g_fakeLocale]; } return [self avs_currentLocale]; }
++ (NSLocale *)avs_autoupdatingCurrentLocale { if (g_envSpoofingEnabled && g_fakeLocale) { return [NSLocale localeWithLocaleIdentifier:g_fakeLocale]; } return [self avs_autoupdatingCurrentLocale]; } // 🌟 深层防御
 + (NSArray<NSString *> *)avs_preferredLanguages { if (g_envSpoofingEnabled && g_fakeLocale) { return @[g_fakeLocale, @"en-US"]; } return [self avs_preferredLanguages]; }
 @end
 
@@ -655,7 +675,6 @@ static NSString *g_fakeLocale = nil;
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(requestLocation)), class_getInstanceMethod(locClass, @selector(avs_requestLocation)));
     }
     
-    // 🌟 核心升级：交换 CLLocation 的所有属性 Getter 方法，实现对象级劫持
     Class clLocationClass = NSClassFromString(@"CLLocation");
     if (clLocationClass) {
         method_exchangeImplementations(class_getInstanceMethod(clLocationClass, @selector(coordinate)), class_getInstanceMethod(clLocationClass, @selector(avs_coordinate)));
@@ -680,10 +699,12 @@ static NSString *g_fakeLocale = nil;
     if (tzClass) {
         method_exchangeImplementations(class_getClassMethod(tzClass, @selector(systemTimeZone)), class_getClassMethod(tzClass, @selector(avs_systemTimeZone)));
         method_exchangeImplementations(class_getClassMethod(tzClass, @selector(defaultTimeZone)), class_getClassMethod(tzClass, @selector(avs_defaultTimeZone)));
+        method_exchangeImplementations(class_getClassMethod(tzClass, @selector(localTimeZone)), class_getClassMethod(tzClass, @selector(avs_localTimeZone))); // 🌟 深层防御: Hook localTimeZone
     }
     Class loclClass = NSClassFromString(@"NSLocale");
     if (loclClass) {
         method_exchangeImplementations(class_getClassMethod(loclClass, @selector(currentLocale)), class_getClassMethod(loclClass, @selector(avs_currentLocale)));
+        method_exchangeImplementations(class_getClassMethod(loclClass, @selector(autoupdatingCurrentLocale)), class_getClassMethod(loclClass, @selector(avs_autoupdatingCurrentLocale))); // 🌟 深层防御: Hook autoupdatingCurrentLocale
         method_exchangeImplementations(class_getClassMethod(loclClass, @selector(preferredLanguages)), class_getClassMethod(loclClass, @selector(avs_preferredLanguages)));
     }
 }
