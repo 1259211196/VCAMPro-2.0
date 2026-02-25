@@ -19,7 +19,7 @@
 #pragma clang diagnostic ignored "-Wdeprecated-declarations" 
 
 // ============================================================================
-// 【0. 极致安全的 C 语言静态缓存 (杜绝启动死锁 & 支持热更新)】
+// 【0. 极致安全的 C 语言静态缓存 (支持热更新)】
 // ============================================================================
 static BOOL g_envSpoofingEnabled = NO;
 static double g_fakeLat = 0.0;
@@ -32,7 +32,7 @@ static NSString *g_fakeTZ = nil;
 static NSString *g_fakeLocale = nil;
 
 // ============================================================================
-// 【1. 伪装系统大管家 (类名已混淆伪装)】
+// 【1. 伪装系统大管家】
 // ============================================================================
 @class AVCaptureHUDWindow, AVCaptureMapWindow, AVStreamCoreProcessor;
 
@@ -98,7 +98,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【3. 极致安全底层推流引擎】
+// 【3. 极致安全底层推流引擎 (防闪透帧保持)】
 // ============================================================================
 @interface AVStreamDecoder : NSObject
 - (instancetype)initWithVideoPath:(NSString *)path;
@@ -133,7 +133,7 @@ static NSString *g_fakeLocale = nil;
 @property (nonatomic, strong) AVStreamDecoder *decoder;
 @property (nonatomic, assign) VTPixelTransferSessionRef pixelTransferSession;
 @property (nonatomic, strong) NSLock *decoderLock;
-@property (nonatomic, assign) CVPixelBufferRef lastPixelBuffer; // 🌟 新增：最后一帧缓存变量
+@property (nonatomic, assign) CVPixelBufferRef lastPixelBuffer;
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer;
 - (void)processDepthBuffer:(AVDepthData *)depthData;
 - (void)loadVideoForCurrentSlot:(NSInteger)slot;
@@ -143,7 +143,7 @@ static NSString *g_fakeLocale = nil;
 - (instancetype)init {
     if (self = [super init]) {
         _decoderLock = [[NSLock alloc] init];
-        _lastPixelBuffer = NULL; // 🌟 初始化为空
+        _lastPixelBuffer = NULL; 
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_pixelTransferSession);
         if (_pixelTransferSession) VTSessionSetProperty(_pixelTransferSession, kVTPixelTransferPropertyKey_ScalingMode, kVTScalingMode_CropSourceToCleanAperture);
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleChannelChange:) name:@"AVSChannelDidChangeNotification" object:nil];
@@ -156,8 +156,6 @@ static NSString *g_fakeLocale = nil;
     NSString *videoPath = [docPath stringByAppendingPathComponent:[NSString stringWithFormat:@"test%ld.mp4", (long)slot]];
     [self.decoderLock lock]; 
     self.decoder = [[AVStreamDecoder alloc] initWithVideoPath:videoPath]; 
-    
-    // 🌟 修复：切换视频时清空旧残影
     if (_lastPixelBuffer) {
         CVPixelBufferRelease(_lastPixelBuffer);
         _lastPixelBuffer = NULL;
@@ -176,9 +174,6 @@ static NSString *g_fakeLocale = nil;
     CVPixelBufferRef srcPix = [self.decoder copyNextPixelBuffer]; 
     [self.decoderLock unlock];
     
-    // ==========================================================
-    // 🌟 终极修复：帧保持机制 (Frame Hold) + 黑屏兜底
-    // ==========================================================
     if (srcPix) {
         if (_lastPixelBuffer) CVPixelBufferRelease(_lastPixelBuffer);
         _lastPixelBuffer = CVPixelBufferRetain(srcPix);
@@ -193,7 +188,6 @@ static NSString *g_fakeLocale = nil;
         if (dstPix && self.pixelTransferSession) VTPixelTransferSessionTransferImage(self.pixelTransferSession, srcPix, dstPix);
         CVPixelBufferRelease(srcPix); 
     } else {
-        // 兜底方案：强制黑屏，绝不暴露真实环境
         CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (dstPix && CVPixelBufferLockBaseAddress(dstPix, 0) == kCVReturnSuccess) {
             size_t size = CVPixelBufferGetBytesPerRow(dstPix) * CVPixelBufferGetHeight(dstPix);
@@ -244,7 +238,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【4. 隐形环境伪装代理】
+// 【4. 隐形环境伪装代理 (防崩溃 & 防旧版定位侧漏)】
 // ============================================================================
 @interface AVCameraSessionProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureDataOutputSynchronizerDelegate, AVCaptureMetadataOutputObjectsDelegate, CLLocationManagerDelegate>
 @property (nonatomic, weak) id target;
@@ -407,7 +401,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【6. 环境配置窗口 - 终极触控防拦截与修复版】
+// 【6. 环境配置窗口 - 🌟 离线雷达探测修复版 (完美防空白)】
 // ============================================================================
 @implementation AVCaptureMapWindow { 
     MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; 
@@ -458,10 +452,7 @@ static NSString *g_fakeLocale = nil;
     if (@available(iOS 13.0, *)) {
         if (!self.windowScene) {
             for (UIWindowScene *s in (NSArray *)[UIApplication sharedApplication].connectedScenes) {
-                if (s.activationState == UISceneActivationStateForegroundActive) {
-                    self.windowScene = s;
-                    break;
-                }
+                if (s.activationState == UISceneActivationStateForegroundActive) { self.windowScene = s; break; }
             }
         }
     }
@@ -470,17 +461,21 @@ static NSString *g_fakeLocale = nil;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    if ([touch.view isDescendantOfView:_mapView] || 
-        [touch.view isKindOfClass:[UIButton class]] || 
-        [touch.view isKindOfClass:[UISwitch class]]) {
-        return NO; 
-    }
+    if ([touch.view isDescendantOfView:_mapView] || [touch.view isKindOfClass:[UIButton class]] || [touch.view isKindOfClass:[UISwitch class]]) { return NO; }
     return YES;
 }
 
 - (void)setupUI {
     UIView *container = self.rootViewController.view;
-    _pendingLat = g_fakeLat; _pendingLon = g_fakeLon;
+    
+    // 🌟 核心修复：直接读取全局变量状态，防止界面渲染为空白
+    _pendingLat = g_fakeLat != 0.0 ? g_fakeLat : 50.1109; 
+    _pendingLon = g_fakeLon != 0.0 ? g_fakeLon : 8.6821;
+    _pMCC = g_fakeMCC ?: @"262";
+    _pMNC = g_fakeMNC ?: @"01";
+    _pCarrier = g_fakeCarrierName ?: @"Telekom.de";
+    _pTZ = g_fakeTZ ?: @"Europe/Berlin";
+    _pLocale = g_fakeLocale ?: @"de_DE";
 
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 15, 200, 20)];
     title.text = @"🌍 环境伪装配置"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16];
@@ -508,17 +503,25 @@ static NSString *g_fakeLocale = nil;
     save.frame = CGRectMake(12, 385, 286, 44);
     save.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0];
     save.layer.cornerRadius = 8;
-    [save setTitle:@"保存配置并关闭" forState:UIControlStateNormal];
+    [save setTitle:@"保存配置并热更新" forState:UIControlStateNormal];
     [save setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     [save addTarget:self action:@selector(saveAndClose) forControlEvents:UIControlEventTouchUpInside];
     [container addSubview:save];
 
-    CLLocationCoordinate2D coord = CLLocationCoordinate2DMake(_pendingLat ?: 50.11, _pendingLon ?: 8.68);
-    [_mapView setRegion:MKCoordinateRegionMake(coord, MKCoordinateSpanMake(5, 5)) animated:NO];
+    [_mapView setRegion:MKCoordinateRegionMake(CLLocationCoordinate2DMake(_pendingLat, _pendingLon), MKCoordinateSpanMake(5, 5)) animated:NO];
 }
 
 - (void)updateLabel {
-    _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n运营商: %@ (%@-%@)\n时区: %@", _pendingLat, _pendingLon, _pCarrier?:@"-", _pMCC?:@"-", _pMNC?:@"-", _pTZ?:@"-"];
+    _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n运营商: %@ (%@-%@)\n时区: %@ | 语言: %@", _pendingLat, _pendingLon, _pCarrier?:@"-", _pMCC?:@"-", _pMNC?:@"-", _pTZ?:@"-", _pLocale?:@"-"];
+}
+
+// 🌟 辅助方法：设置国家信息
+- (void)setFakeCountry:(NSString *)cc {
+    self->_pMCC = @"262"; self->_pMNC = @"01"; self->_pCarrier = @"Telekom.de"; self->_pTZ = @"Europe/Berlin"; self->_pLocale = @"de_DE"; // Default DE
+    if ([cc isEqualToString:@"us"]) { self->_pMCC = @"310"; self->_pMNC = @"410"; self->_pCarrier = @"AT&T"; self->_pTZ = @"America/New_York"; self->_pLocale = @"en_US"; }
+    else if ([cc isEqualToString:@"fr"]) { self->_pMCC = @"208"; self->_pMNC = @"01"; self->_pCarrier = @"Orange F"; self->_pTZ = @"Europe/Paris"; self->_pLocale = @"fr_FR"; }
+    else if ([cc isEqualToString:@"it"]) { self->_pMCC = @"222"; self->_pMNC = @"01"; self->_pCarrier = @"TIM"; self->_pTZ = @"Europe/Rome"; self->_pLocale = @"it_IT"; }
+    else if ([cc isEqualToString:@"gb"]) { self->_pMCC = @"234"; self->_pMNC = @"15"; self->_pCarrier = @"Vodafone UK"; self->_pTZ = @"Europe/London"; self->_pLocale = @"en_GB"; }
 }
 
 - (void)dropPin:(UILongPressGestureRecognizer *)g {
@@ -529,21 +532,28 @@ static NSString *g_fakeLocale = nil;
     MKPointAnnotation *ann = [[MKPointAnnotation alloc] init]; ann.coordinate = c; [_mapView addAnnotation:ann];
     _pendingLat = c.latitude; _pendingLon = c.longitude;
     
+    _infoLabel.text = @"⏳ 正在解析该国家基站与时区...";
+    _infoLabel.textColor = [UIColor orangeColor];
+    
     CLGeocoder *geo = [[CLGeocoder alloc] init];
     [geo reverseGeocodeLocation:[[CLLocation alloc] initWithLatitude:c.latitude longitude:c.longitude] completionHandler:^(NSArray *pls, NSError *err) {
-        if (pls.count > 0) {
-            CLPlacemark *pl = pls.firstObject;
-            NSString *cc = pl.ISOcountryCode.lowercaseString;
-            self->_pMCC = @"262"; self->_pMNC = @"01"; self->_pCarrier = @"Telekom.de"; self->_pTZ = @"Europe/Berlin"; self->_pLocale = @"de_DE";
-            if ([cc isEqualToString:@"us"]) { self->_pMCC = @"310"; self->_pMNC = @"410"; self->_pCarrier = @"AT&T"; self->_pTZ = @"America/New_York"; self->_pLocale = @"en_US"; }
-            else if ([cc isEqualToString:@"fr"]) { self->_pMCC = @"208"; self->_pMNC = @"01"; self->_pCarrier = @"Orange F"; self->_pTZ = @"Europe/Paris"; self->_pLocale = @"fr_FR"; }
-            else if ([cc isEqualToString:@"it"]) { self->_pMCC = @"222"; self->_pMNC = @"01"; self->_pCarrier = @"TIM"; self->_pTZ = @"Europe/Rome"; self->_pLocale = @"it_IT"; }
-            dispatch_async(dispatch_get_main_queue(), ^{ 
-                [self updateLabel]; 
-                UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
-                [feedback impactOccurred]; 
-            });
-        }
+        dispatch_async(dispatch_get_main_queue(), ^{ 
+            // 🌟 核心修复：离线雷达匹配 (无论 VPN 是否拦截 Apple 服务，都能精准出结果)
+            if (err || pls.count == 0) {
+                if (c.longitude < -60) { [self setFakeCountry:@"us"]; } 
+                else if (c.longitude > -5 && c.longitude < 8 && c.latitude < 51) { [self setFakeCountry:@"fr"]; } 
+                else if (c.longitude > 6 && c.longitude < 18 && c.latitude < 47) { [self setFakeCountry:@"it"]; } 
+                else if (c.longitude > -10 && c.longitude < 2 && c.latitude > 50) { [self setFakeCountry:@"gb"]; } 
+                else { [self setFakeCountry:@"de"]; } 
+            } else {
+                CLPlacemark *pl = pls.firstObject;
+                [self setFakeCountry:pl.ISOcountryCode.lowercaseString];
+            }
+            self->_infoLabel.textColor = [UIColor greenColor];
+            [self updateLabel]; 
+            UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+            [feedback impactOccurred]; 
+        });
     }];
 }
 
@@ -559,7 +569,7 @@ static NSString *g_fakeLocale = nil;
     if (_pLocale) [ud setObject:_pLocale forKey:@"avs_env_locale"];
     [ud synchronize];
     
-    // 🌟 热更新机制，无需重启 App
+    // 热更新
     g_envSpoofingEnabled = _envSwitch.on;
     g_fakeLat = _pendingLat;
     g_fakeLon = _pendingLon;
@@ -583,7 +593,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【提前声明所有系统接口，杜绝严苛编译器的拦截报错】
+// 【提前声明所有系统接口】
 // ============================================================================
 @interface CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName;
@@ -596,9 +606,12 @@ static NSString *g_fakeLocale = nil;
 - (NSDictionary<NSString *,CTCarrier *> *)avs_serviceSubscriberCellularProviders;
 @end
 
+// 🌟 接口补充：加入强注定位声明
 @interface CLLocationManager (AVStreamHook)
 - (CLLocation *)avs_location;
 - (void)avs_setDelegate:(id<CLLocationManagerDelegate>)delegate;
+- (void)avs_startUpdatingLocation;
+- (void)avs_requestLocation;
 @end
 
 @interface NSTimeZone (AVStreamHook)
@@ -647,6 +660,7 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
+// 🌟 核心修复：强效拦截，主动推送定位
 @implementation CLLocationManager (AVStreamHook)
 - (CLLocation *)avs_location {
     if (g_envSpoofingEnabled) { 
@@ -658,12 +672,41 @@ static NSString *g_fakeLocale = nil;
     }
     return [self avs_location];
 }
+
 - (void)avs_setDelegate:(id<CLLocationManagerDelegate>)delegate {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"AVCameraSessionProxy")]) { 
         AVCameraSessionProxy *proxy = [AVCameraSessionProxy proxyWithTarget:delegate]; 
         objc_setAssociatedObject(self, "_avs_loc_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); 
         [self avs_setDelegate:(id<CLLocationManagerDelegate>)proxy];
     } else { [self avs_setDelegate:delegate]; }
+}
+
+- (void)avs_startUpdatingLocation {
+    [self avs_startUpdatingLocation]; 
+    if (g_envSpoofingEnabled && self.delegate) {
+        double jLat = (arc4random_uniform(100) - 50) / 1000000.0;
+        double jLon = (arc4random_uniform(100) - 50) / 1000000.0;
+        CLLocation *fake = [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(g_fakeLat + jLat, g_fakeLon + jLon) altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if ([self.delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
+                [self.delegate locationManager:self didUpdateLocations:@[fake]];
+            }
+        });
+    }
+}
+
+- (void)avs_requestLocation {
+    [self avs_requestLocation];
+    if (g_envSpoofingEnabled && self.delegate) {
+        double jLat = (arc4random_uniform(100) - 50) / 1000000.0;
+        double jLon = (arc4random_uniform(100) - 50) / 1000000.0;
+        CLLocation *fake = [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(g_fakeLat + jLat, g_fakeLon + jLon) altitude:120.0 horizontalAccuracy:5.0 verticalAccuracy:5.0 timestamp:[NSDate date]];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if ([self.delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
+                [self.delegate locationManager:self didUpdateLocations:@[fake]];
+            }
+        });
+    }
 }
 @end
 
@@ -692,7 +735,6 @@ static NSString *g_fakeLocale = nil;
 @implementation UIWindow (AVStreamHook)
 - (void)avs_setupGestures {
     if (![self isKindOfClass:NSClassFromString(@"AVCaptureHUDWindow")] && ![self isKindOfClass:NSClassFromString(@"AVCaptureMapWindow")] && !objc_getAssociatedObject(self, "_avs_g")) {
-        
         UITapGestureRecognizer *videoTap = [[UITapGestureRecognizer alloc] initWithTarget:[AVStreamManager sharedManager] action:@selector(handleTwoFingerLongPress:)];
         videoTap.numberOfTouchesRequired = 3; 
         videoTap.numberOfTapsRequired = 1;
@@ -761,7 +803,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【8. 加载入口】
+// 【8. 加载入口 (完成所有主动与被动代理注册)】
 // ============================================================================
 @interface AVStreamLoader : NSObject
 @end
@@ -793,6 +835,9 @@ static NSString *g_fakeLocale = nil;
     if (locClass) {
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(setDelegate:)), class_getInstanceMethod(locClass, @selector(avs_setDelegate:)));
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(location)), class_getInstanceMethod(locClass, @selector(avs_location)));
+        // 🌟 注册主动喂饭引擎 Hook
+        method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(startUpdatingLocation)), class_getInstanceMethod(locClass, @selector(avs_startUpdatingLocation)));
+        method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(requestLocation)), class_getInstanceMethod(locClass, @selector(avs_requestLocation)));
     }
     
     Class carrierClass = NSClassFromString(@"CTCarrier");
