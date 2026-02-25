@@ -20,6 +20,16 @@
 // 🌟 Fishhook 整合: 引入免越狱 C 函数符号重绑定库
 #import "fishhook.h"
 
+// 🌟 修复: 显式声明 fishhook 函数，防止隐式调用报错
+#ifdef __cplusplus
+extern "C" {
+#endif
+    int rebind_symbols(struct rebinding rebindings[], size_t rebindings_nel);
+    int rebind_symbols_image(void *header, intptr_t slide, struct rebinding rebindings[], size_t rebindings_nel);
+#ifdef __cplusplus
+}
+#endif
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
 #pragma clang diagnostic ignored "-Wavailability"
