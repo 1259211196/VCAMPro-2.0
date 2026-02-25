@@ -9,14 +9,13 @@
 #import <MapKit/MapKit.h>
 #import <CoreTelephony/CTCarrier.h>
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
-#import <sys/utsname.h> // 🌟 引入系统底层硬件库，用于抓取真实主板代号
+#import <sys/utsname.h> 
 #import <objc/runtime.h>
 #import <objc/message.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
 #pragma clang diagnostic ignored "-Wavailability"
-// 🌟 极速修复方案：让编译器“闭嘴”，强行忽略过期 API 警告，确保 Actions 绿灯
 #pragma clang diagnostic ignored "-Wdeprecated-declarations" 
 
 // ============================================================================
@@ -32,25 +31,17 @@ static NSString *g_fakeCarrierName = nil;
 static NSString *g_fakeTZ = nil;
 static NSString *g_fakeLocale = nil;
 
-// 🌟 核心优化 1：最完美真实的 GPS 伪装引擎 (补齐所有信测参数)
+// 🌟 最完美真实的 GPS 伪装引擎
 static CLLocation* generatePerfectFakeLocation(void) {
     double jLat = (arc4random_uniform(100) - 50) / 1000000.0; 
     double jLon = (arc4random_uniform(100) - 50) / 1000000.0;
     double jAlt = (arc4random_uniform(100) - 50) / 10.0;
     CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat + jLat, g_fakeLon + jLon);
-    
-    // 注入：坐标、海拔(45m左右)、极佳水平精度(5m)、垂直精度(4m)、航向无、速度静止
-    return [[CLLocation alloc] initWithCoordinate:c 
-                                         altitude:(45.0 + jAlt) 
-                               horizontalAccuracy:5.0 
-                                 verticalAccuracy:4.0 
-                                           course:-1.0 
-                                            speed:-1.0 
-                                        timestamp:[NSDate date]];
+    return [[CLLocation alloc] initWithCoordinate:c altitude:(45.0 + jAlt) horizontalAccuracy:5.0 verticalAccuracy:4.0 course:-1.0 speed:-1.0 timestamp:[NSDate date]];
 }
 
 // ============================================================================
-// 【1. 伪装系统大管家】
+// 【1. 伪装系统大管家 (删减多余图层，极致轻量)】
 // ============================================================================
 @class AVCaptureHUDWindow, AVCaptureMapWindow, AVStreamCoreProcessor;
 
@@ -58,10 +49,7 @@ static CLLocation* generatePerfectFakeLocation(void) {
 + (instancetype)sharedManager;
 @property (nonatomic, assign) BOOL isEnabled;
 @property (nonatomic, assign) BOOL isHUDVisible; 
-@property (nonatomic, assign) NSInteger currentSlot;
-@property (nonatomic, strong) NSHashTable *displayLayers;
 @property (nonatomic, strong) AVStreamCoreProcessor *processor;
-- (void)updateDisplayLayers;
 @end
 
 @interface AVCaptureHUDWindow : UIWindow <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
@@ -74,7 +62,7 @@ static CLLocation* generatePerfectFakeLocation(void) {
 @end
 
 // ============================================================================
-// 【2. 异步视频去重洗稿引擎 (🌟 核心优化：GPU零损耗 & 强制镜像注入)】
+// 【2. 异步视频去重洗稿引擎 (GPU零损耗 & 强制镜像注入)】
 // ============================================================================
 @interface AVStreamPreprocessor : NSObject
 + (void)processVideoAtURL:(NSURL *)sourceURL toDestination:(NSString *)destPath brightness:(CGFloat)brightness contrast:(CGFloat)contrast saturation:(CGFloat)saturation completion:(void(^)(BOOL success, NSError *error))completion;
@@ -87,12 +75,10 @@ static CLLocation* generatePerfectFakeLocation(void) {
     if (!videoTrack) { if (completion) completion(NO, nil); return; }
 
     AVMutableVideoComposition *videoComposition = [AVMutableVideoComposition videoCompositionWithAsset:asset applyingCIFiltersWithHandler:^(AVAsynchronousCIImageFilteringRequest * _Nonnull request) {
-        // 🌟 性能极客优化：如果滑块完全没动，直接返回原画，跳过 GPU 渲染，极大提升速度！
         if (brightness == 0.0 && contrast == 1.0 && saturation == 1.0) {
             [request finishWithImage:request.sourceImage context:nil];
             return;
         }
-        
         CIFilter *colorFilter = [CIFilter filterWithName:@"CIColorControls"];
         [colorFilter setValue:request.sourceImage forKey:kCIInputImageKey];
         [colorFilter setValue:@(brightness) forKey:kCIInputBrightnessKey];
@@ -107,11 +93,7 @@ static CLLocation* generatePerfectFakeLocation(void) {
     exportSession.videoComposition = videoComposition;
     exportSession.shouldOptimizeForNetworkUse = YES; 
 
-    // ==========================================================
-    // 🌟 全量真机镜像注入与文件格式化
-    // ==========================================================
     NSMutableArray<AVMetadataItem *> *mirrorMetadata = [NSMutableArray array];
-    
     struct utsname systemInfo;
     uname(&systemInfo);
     NSString *hardwareModel = [NSString stringWithCString:systemInfo.machine encoding:NSUTF8StringEncoding];
@@ -127,7 +109,6 @@ static CLLocation* generatePerfectFakeLocation(void) {
         AVMutableMetadataItem *locItem = [[AVMutableMetadataItem alloc] init]; locItem.keySpace = AVMetadataKeySpaceCommon; locItem.key = AVMetadataCommonKeyLocation;
         locItem.value = [NSString stringWithFormat:@"%+08.4f%+09.4f/", g_fakeLat, g_fakeLon]; [mirrorMetadata addObject:locItem];
     }
-
     exportSession.metadata = mirrorMetadata;
 
     [exportSession exportAsynchronouslyWithCompletionHandler:^{
@@ -140,7 +121,7 @@ static CLLocation* generatePerfectFakeLocation(void) {
 @end
 
 // ============================================================================
-// 【3. 极致安全底层推流引擎 (防闪透帧保持)】
+// 【3. 高性能底层推流引擎 (已删除冗余 UI 渲染，只做核心替换)】
 // ============================================================================
 @interface AVStreamDecoder : NSObject
 - (instancetype)initWithVideoPath:(NSString *)path;
@@ -178,7 +159,7 @@ static CLLocation* generatePerfectFakeLocation(void) {
 @property (nonatomic, assign) CVPixelBufferRef lastPixelBuffer;
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer;
 - (void)processDepthBuffer:(AVDepthData *)depthData;
-- (void)loadVideoForCurrentSlot:(NSInteger)slot;
+- (void)loadVideo;
 @end
 
 @implementation AVStreamCoreProcessor
@@ -188,25 +169,22 @@ static CLLocation* generatePerfectFakeLocation(void) {
         _lastPixelBuffer = NULL; 
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_pixelTransferSession);
         if (_pixelTransferSession) VTSessionSetProperty(_pixelTransferSession, kVTPixelTransferPropertyKey_ScalingMode, kVTScalingMode_CropSourceToCleanAperture);
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleChannelChange:) name:@"AVSChannelDidChangeNotification" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleVideoChange:) name:@"AVSVideoDidChangeNotification" object:nil];
     }
     return self;
 }
 
-- (void)loadVideoForCurrentSlot:(NSInteger)slot {
+- (void)loadVideo {
     NSString *docPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    NSString *videoPath = [docPath stringByAppendingPathComponent:[NSString stringWithFormat:@"test%ld.mp4", (long)slot]];
+    NSString *videoPath = [docPath stringByAppendingPathComponent:@"vcam_video.mp4"]; // 固定单文件
     [self.decoderLock lock]; 
     self.decoder = [[AVStreamDecoder alloc] initWithVideoPath:videoPath]; 
-    if (_lastPixelBuffer) {
-        CVPixelBufferRelease(_lastPixelBuffer);
-        _lastPixelBuffer = NULL;
-    }
+    if (_lastPixelBuffer) { CVPixelBufferRelease(_lastPixelBuffer); _lastPixelBuffer = NULL; }
     [self.decoderLock unlock];
 }
 
-- (void)handleChannelChange:(NSNotification *)note {
-    [self loadVideoForCurrentSlot:[AVStreamManager sharedManager].currentSlot];
+- (void)handleVideoChange:(NSNotification *)note {
+    [self loadVideo];
 }
 
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer {
@@ -224,7 +202,7 @@ static CLLocation* generatePerfectFakeLocation(void) {
     }
 
     if (srcPix) {
-        // 🌟 借尸还魂：保留真机 EXIF，仅替换像素
+        // 🌟 借尸还魂：保留真机 EXIF，仅替换像素。已删除多余图层队列渲染，性能极高！
         CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (dstPix && self.pixelTransferSession) VTPixelTransferSessionTransferImage(self.pixelTransferSession, srcPix, dstPix);
         CVPixelBufferRelease(srcPix); 
@@ -234,12 +212,6 @@ static CLLocation* generatePerfectFakeLocation(void) {
             size_t size = CVPixelBufferGetBytesPerRow(dstPix) * CVPixelBufferGetHeight(dstPix);
             memset(CVPixelBufferGetBaseAddress(dstPix), 0, size);
             CVPixelBufferUnlockBaseAddress(dstPix, 0);
-        }
-    }
-    
-    @synchronized ([AVStreamManager sharedManager].displayLayers) {
-        for (AVSampleBufferDisplayLayer *layer in [[AVStreamManager sharedManager].displayLayers allObjects]) {
-            if (!layer.hidden && layer.isReadyForMoreMediaData) { if (layer.status == AVQueuedSampleBufferRenderingStatusFailed) [layer flush]; [layer enqueueSampleBuffer:sampleBuffer]; }
         }
     }
 }
@@ -260,18 +232,15 @@ static CLLocation* generatePerfectFakeLocation(void) {
 + (instancetype)sharedManager {
     static AVStreamManager *mgr = nil; static dispatch_once_t once;
     dispatch_once(&once, ^{ 
-        mgr = [[AVStreamManager alloc] init]; mgr.isEnabled = YES; mgr.isHUDVisible = NO; mgr.currentSlot = 1; mgr.displayLayers = [NSHashTable weakObjectsHashTable]; mgr.processor = [[AVStreamCoreProcessor alloc] init]; 
-        [mgr.processor loadVideoForCurrentSlot:mgr.currentSlot]; 
+        mgr = [[AVStreamManager alloc] init]; mgr.isEnabled = YES; mgr.isHUDVisible = NO; 
+        mgr.processor = [[AVStreamCoreProcessor alloc] init]; 
+        [mgr.processor loadVideo]; 
     });
     return mgr;
 }
-- (void)updateDisplayLayers {
-    BOOL shouldHide = (!self.isHUDVisible || !self.isEnabled);
-    dispatch_async(dispatch_get_main_queue(), ^{ @synchronized (self.displayLayers) { for (AVSampleBufferDisplayLayer *layer in self.displayLayers.allObjects) { layer.hidden = shouldHide; if (shouldHide) [layer flush]; } } });
-}
 - (void)handleTwoFingerLongPress:(UIGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateRecognized || gesture.state == UIGestureRecognizerStateBegan) { 
-        self.isHUDVisible = YES; [AVCaptureHUDWindow sharedHUD].hidden = NO; [self updateDisplayLayers]; 
+        self.isHUDVisible = YES; [AVCaptureHUDWindow sharedHUD].hidden = NO; 
         UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred]; 
     }
 }
@@ -345,17 +314,17 @@ static CLLocation* generatePerfectFakeLocation(void) {
 @end
 
 // ============================================================================
-// 【5. HUD 控制面板 (视频洗稿与渲染)】
+// 【5. HUD 控制面板 (🌟 全新极简 UI：单通道无预览，极致省电)】
 // ============================================================================
 @implementation AVCaptureHUDWindow { 
-    UILabel *_statusLabel; UISwitch *_powerSwitch; NSInteger _pendingSlot; AVSampleBufferDisplayLayer *_previewLayer; 
+    UILabel *_statusLabel; UISwitch *_powerSwitch; 
     UISwitch *_colorSwitch; UISlider *_brightSlider; UISlider *_contrastSlider; UISlider *_saturationSlider;
 }
 + (instancetype)sharedHUD {
     static AVCaptureHUDWindow *hud = nil; static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        if (@available(iOS 13.0, *)) { for (UIWindowScene *scene in (NSArray<UIWindowScene *>*)[UIApplication sharedApplication].connectedScenes) { if (scene.activationState == UISceneActivationStateForegroundActive) { hud = [[AVCaptureHUDWindow alloc] initWithWindowScene:scene]; hud.frame = CGRectMake(20, 80, 290, 440); break; } } }
-        if (!hud) hud = [[AVCaptureHUDWindow alloc] initWithFrame:CGRectMake(20, 80, 290, 440)];
+        if (@available(iOS 13.0, *)) { for (UIWindowScene *scene in (NSArray<UIWindowScene *>*)[UIApplication sharedApplication].connectedScenes) { if (scene.activationState == UISceneActivationStateForegroundActive) { hud = [[AVCaptureHUDWindow alloc] initWithWindowScene:scene]; hud.frame = CGRectMake(20, 80, 290, 310); break; } } }
+        if (!hud) hud = [[AVCaptureHUDWindow alloc] initWithFrame:CGRectMake(20, 80, 290, 310)]; // 缩短了面板高度
     }); return hud;
 }
 - (instancetype)initWithFrame:(CGRect)frame { if (self = [super initWithFrame:frame]) { [self commonInit]; } return self; }
@@ -365,54 +334,69 @@ static CLLocation* generatePerfectFakeLocation(void) {
     [self setupUI]; UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]; [self addGestureRecognizer:pan];
 }
 - (void)setupUI {
-    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 180, 20)]; _statusLabel.textColor = [UIColor greenColor]; _statusLabel.font = [UIFont boldSystemFontOfSize:14]; _statusLabel.text = @"🟢 V-Cam [CH 1]"; [self addSubview:_statusLabel];
+    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 180, 20)]; _statusLabel.textColor = [UIColor greenColor]; _statusLabel.font = [UIFont boldSystemFontOfSize:14]; _statusLabel.text = @"🟢 V-Cam [单通道引擎]"; [self addSubview:_statusLabel];
+    
     _powerSwitch = [[UISwitch alloc] init]; _powerSwitch.transform = CGAffineTransformMakeScale(0.8, 0.8); _powerSwitch.frame = CGRectMake(230, 7, 50, 31); _powerSwitch.on = YES; [_powerSwitch addTarget:self action:@selector(togglePower:) forControlEvents:UIControlEventValueChanged]; [self addSubview:_powerSwitch];
-    CGFloat btnWidth = 40, btnHeight = 38, gap = 8;
-    for (int i = 0; i < 4; i++) {
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem]; btn.frame = CGRectMake(12 + i * (btnWidth + gap), 42, btnWidth, btnHeight); btn.backgroundColor = [UIColor colorWithWhite:0.3 alpha:1.0]; btn.layer.cornerRadius = 8; [btn setTitle:[NSString stringWithFormat:@"%d", i+1] forState:UIControlStateNormal]; [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; btn.titleLabel.font = [UIFont boldSystemFontOfSize:16]; btn.tag = i + 1;
-        [btn addTarget:self action:@selector(channelSwitched:) forControlEvents:UIControlEventTouchUpInside]; UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)]; [btn addGestureRecognizer:lp]; [self addSubview:btn];
-    }
-    UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem]; clearBtn.frame = CGRectMake(12 + 4 * (btnWidth + gap), 42, 60, btnHeight); clearBtn.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:1.0]; clearBtn.layer.cornerRadius = 8; [clearBtn setTitle:@"隐藏" forState:UIControlStateNormal]; [clearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14]; [clearBtn addTarget:self action:@selector(hideHUD) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:clearBtn];
     
-    _previewLayer = [[AVSampleBufferDisplayLayer alloc] init]; _previewLayer.frame = CGRectMake(12, 90, 266, 150); _previewLayer.videoGravity = AVLayerVideoGravityResizeAspectFill; _previewLayer.backgroundColor = [UIColor blackColor].CGColor; _previewLayer.cornerRadius = 8; _previewLayer.masksToBounds = YES; [self.layer addSublayer:_previewLayer]; [[AVStreamManager sharedManager].displayLayers addObject:_previewLayer];
+    // 🌟 核心优化：单按钮设计，彻底抛弃多通道和长按逻辑
+    UIButton *importBtn = [UIButton buttonWithType:UIButtonTypeSystem]; 
+    importBtn.frame = CGRectMake(12, 45, 195, 44); 
+    importBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; 
+    importBtn.layer.cornerRadius = 8; 
+    [importBtn setTitle:@"📁 导入并替换视频" forState:UIControlStateNormal]; 
+    [importBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; 
+    importBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15]; 
+    [importBtn addTarget:self action:@selector(openVideoPicker) forControlEvents:UIControlEventTouchUpInside]; 
+    [self addSubview:importBtn];
     
-    UILabel *colorLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 250, 150, 20)]; colorLabel.text = @"🎨 导入重编码与去重"; colorLabel.textColor = [UIColor whiteColor]; colorLabel.font = [UIFont boldSystemFontOfSize:14]; [self addSubview:colorLabel];
-    _colorSwitch = [[UISwitch alloc] init]; _colorSwitch.transform = CGAffineTransformMakeScale(0.7, 0.7); _colorSwitch.frame = CGRectMake(235, 245, 50, 31); _colorSwitch.on = NO; [self addSubview:_colorSwitch];
+    UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem]; 
+    clearBtn.frame = CGRectMake(215, 45, 63, 44); 
+    clearBtn.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:1.0]; 
+    clearBtn.layer.cornerRadius = 8; 
+    [clearBtn setTitle:@"隐藏" forState:UIControlStateNormal]; 
+    [clearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; 
+    clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14]; 
+    [clearBtn addTarget:self action:@selector(hideHUD) forControlEvents:UIControlEventTouchUpInside]; 
+    [self addSubview:clearBtn];
     
-    UILabel *bLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 280, 40, 20)]; bLabel.text = @"亮度"; bLabel.textColor = [UIColor lightGrayColor]; bLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:bLabel];
-    _brightSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 280, 220, 20)]; _brightSlider.minimumValue = -0.2; _brightSlider.maximumValue = 0.2; _brightSlider.value = 0.0; [self addSubview:_brightSlider];
+    // UI 下移，因为去掉了预览框
+    UILabel *colorLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 110, 150, 20)]; colorLabel.text = @"🎨 防搬运滤镜重编码"; colorLabel.textColor = [UIColor whiteColor]; colorLabel.font = [UIFont boldSystemFontOfSize:14]; [self addSubview:colorLabel];
+    _colorSwitch = [[UISwitch alloc] init]; _colorSwitch.transform = CGAffineTransformMakeScale(0.7, 0.7); _colorSwitch.frame = CGRectMake(235, 105, 50, 31); _colorSwitch.on = NO; [self addSubview:_colorSwitch];
     
-    UILabel *cLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 320, 40, 20)]; cLabel.text = @"对比"; cLabel.textColor = [UIColor lightGrayColor]; cLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:cLabel];
-    _contrastSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 320, 220, 20)]; _contrastSlider.minimumValue = 0.5; _maximumValue = 1.5; _contrastSlider.value = 1.0; [self addSubview:_contrastSlider];
+    UILabel *bLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 150, 40, 20)]; bLabel.text = @"亮度"; bLabel.textColor = [UIColor lightGrayColor]; bLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:bLabel];
+    _brightSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 150, 220, 20)]; _brightSlider.minimumValue = -0.2; _brightSlider.maximumValue = 0.2; _brightSlider.value = 0.0; [self addSubview:_brightSlider];
     
-    UILabel *sLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 360, 40, 20)]; sLabel.text = @"饱和"; sLabel.textColor = [UIColor lightGrayColor]; sLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:sLabel];
-    _saturationSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 360, 220, 20)]; _saturationSlider.minimumValue = 0.0; _saturationSlider.maximumValue = 2.0; _saturationSlider.value = 1.0; [self addSubview:_saturationSlider];
+    UILabel *cLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 190, 40, 20)]; cLabel.text = @"对比"; cLabel.textColor = [UIColor lightGrayColor]; cLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:cLabel];
+    _contrastSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 190, 220, 20)]; _contrastSlider.minimumValue = 0.5; _contrastSlider.maximumValue = 1.5; _contrastSlider.value = 1.0; [self addSubview:_contrastSlider];
+    
+    UILabel *sLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 230, 40, 20)]; sLabel.text = @"饱和"; sLabel.textColor = [UIColor lightGrayColor]; sLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:sLabel];
+    _saturationSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 230, 220, 20)]; _saturationSlider.minimumValue = 0.0; _saturationSlider.maximumValue = 2.0; _saturationSlider.value = 1.0; [self addSubview:_saturationSlider];
 }
+
 - (void)hideHUD { self.hidden = YES; [AVStreamManager sharedManager].isHUDVisible = NO; [[AVStreamManager sharedManager] updateDisplayLayers]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
-- (void)togglePower:(UISwitch *)sender { [AVStreamManager sharedManager].isEnabled = sender.isOn; [[AVStreamManager sharedManager] updateDisplayLayers]; if (sender.isOn) { _statusLabel.text = [NSString stringWithFormat:@"🟢 V-Cam [CH %ld]", (long)[AVStreamManager sharedManager].currentSlot]; _statusLabel.textColor = [UIColor greenColor]; } else { _statusLabel.text = @"🔴 已禁用"; _statusLabel.textColor = [UIColor redColor]; } UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
+- (void)togglePower:(UISwitch *)sender { [AVStreamManager sharedManager].isEnabled = sender.isOn; if (sender.isOn) { _statusLabel.text = @"🟢 V-Cam [单通道引擎]"; _statusLabel.textColor = [UIColor greenColor]; } else { _statusLabel.text = @"🔴 已禁用"; _statusLabel.textColor = [UIColor redColor]; } UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
 - (void)handlePan:(UIPanGestureRecognizer *)pan { CGPoint trans = [pan translationInView:self]; self.center = CGPointMake(self.center.x + trans.x, self.center.y + trans.y); [pan setTranslation:CGPointZero inView:self]; }
-- (void)channelSwitched:(UIButton *)sender { [AVStreamManager sharedManager].currentSlot = sender.tag; if (_powerSwitch.isOn) { _statusLabel.text = [NSString stringWithFormat:@"🟢 V-Cam [CH %ld]", (long)sender.tag]; } [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSChannelDidChangeNotification" object:nil]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred]; }
-- (void)handleLongPress:(UILongPressGestureRecognizer *)lp { 
-    if (lp.state == UIGestureRecognizerStateBegan) { 
-        _pendingSlot = lp.view.tag; UIImagePickerController *picker = [[UIImagePickerController alloc] init]; picker.delegate = self; picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary; picker.mediaTypes = @[@"public.movie"]; picker.videoExportPreset = AVAssetExportPresetPassthrough; 
-        UIWindow *foundWindow = nil; 
-        if (@available(iOS 13.0, *)) { for (UIWindowScene *scene in (NSArray<UIWindowScene *>*)[UIApplication sharedApplication].connectedScenes) { if (scene.activationState == UISceneActivationStateForegroundActive) { for (UIWindow *window in scene.windows) { if (window.isKeyWindow || window.windowLevel == UIWindowLevelNormal) { foundWindow = window; break; } } } if (foundWindow) break; } } 
-        UIViewController *root = foundWindow.rootViewController; while (root.presentedViewController) root = root.presentedViewController; 
-        if (root) [root presentViewController:picker animated:YES completion:nil]; 
-    } 
+
+// 🌟 直接调起相册，无需长按
+- (void)openVideoPicker {
+    UIImagePickerController *picker = [[UIImagePickerController alloc] init]; picker.delegate = self; picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary; picker.mediaTypes = @[@"public.movie"]; picker.videoExportPreset = AVAssetExportPresetPassthrough; 
+    UIWindow *foundWindow = nil; 
+    if (@available(iOS 13.0, *)) { for (UIWindowScene *scene in (NSArray<UIWindowScene *>*)[UIApplication sharedApplication].connectedScenes) { if (scene.activationState == UISceneActivationStateForegroundActive) { for (UIWindow *window in scene.windows) { if (window.isKeyWindow || window.windowLevel == UIWindowLevelNormal) { foundWindow = window; break; } } } if (foundWindow) break; } } 
+    UIViewController *root = foundWindow.rootViewController; while (root.presentedViewController) root = root.presentedViewController; 
+    if (root) [root presentViewController:picker animated:YES completion:nil]; 
 }
+
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info { 
     NSURL *url = info[UIImagePickerControllerMediaURL]; 
     if (url) { 
-        NSString *dest = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject] stringByAppendingPathComponent:[NSString stringWithFormat:@"test%ld.mp4", (long)self->_pendingSlot]]; 
+        // 固定存储为 vcam_video.mp4
+        NSString *dest = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject] stringByAppendingPathComponent:@"vcam_video.mp4"]; 
         [[NSFileManager defaultManager] removeItemAtPath:dest error:nil]; 
         
-        // 🌟 核心防御：彻底废除危险的极速载入(直接复制)功能。
-        // 无论开关如何，强制执行重编码以抹除平台标签，注入真机灵魂！
         self->_statusLabel.text = @"⏳ 真机镜像洗稿中..."; 
         self->_statusLabel.textColor = [UIColor orangeColor];
         
-        // 只有开启开关时，才读取滑块数值；未开启时传入 0.0/1.0/1.0 触发极致性能零损耗跳过
+        // 🌟 读取滑块值，如果不开启滤镜，传入默认值以触发极速 0 损耗导出，但依然进行全量元数据覆盖
         CGFloat bVal = _colorSwitch.isOn ? _brightSlider.value : 0.0; 
         CGFloat cVal = _colorSwitch.isOn ? _contrastSlider.value : 1.0; 
         CGFloat sVal = _colorSwitch.isOn ? _saturationSlider.value : 1.0;
@@ -421,13 +405,11 @@ static CLLocation* generatePerfectFakeLocation(void) {
             [AVStreamPreprocessor processVideoAtURL:url toDestination:dest brightness:bVal contrast:cVal saturation:sVal completion:^(BOOL success, NSError *error) {
                 dispatch_async(dispatch_get_main_queue(), ^{ 
                     if (success) { 
-                        if ([AVStreamManager sharedManager].currentSlot == self->_pendingSlot) {
-                            [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSChannelDidChangeNotification" object:nil]; 
-                        }
-                        self->_statusLabel.text = [NSString stringWithFormat:@"🟢 V-Cam [CH %ld]", (long)[AVStreamManager sharedManager].currentSlot]; 
+                        [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSVideoDidChangeNotification" object:nil]; 
+                        self->_statusLabel.text = @"🟢 V-Cam [替换就绪]"; 
                         self->_statusLabel.textColor = [UIColor greenColor];
                     } else { 
-                        self->_statusLabel.text = @"❌ 渲染与注入失败"; 
+                        self->_statusLabel.text = @"❌ 洗稿失败"; 
                         self->_statusLabel.textColor = [UIColor redColor]; 
                     } 
                 });
@@ -436,23 +418,10 @@ static CLLocation* generatePerfectFakeLocation(void) {
     } 
     [picker dismissViewControllerAnimated:YES completion:nil]; 
 }
-            self->_statusLabel.text = @"⚡️ 极速载入..."; 
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ 
-                BOOL success = [[NSFileManager defaultManager] copyItemAtURL:url toURL:[NSURL fileURLWithPath:dest] error:nil]; 
-                dispatch_async(dispatch_get_main_queue(), ^{ 
-                    if (success) { if ([AVStreamManager sharedManager].currentSlot == self->_pendingSlot) [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSChannelDidChangeNotification" object:nil]; 
-                        self->_statusLabel.text = [NSString stringWithFormat:@"🟢 V-Cam [CH %ld]", (long)[AVStreamManager sharedManager].currentSlot]; 
-                    } else { self->_statusLabel.text = @"❌ 极速导入失败"; } 
-                }); 
-            });
-        }
-    } 
-    [picker dismissViewControllerAnimated:YES completion:nil]; 
-}
 @end
 
 // ============================================================================
-// 【6. 环境配置窗口 - 离线雷达探测修复版 (完美防空白 & 热更新)】
+// 【6. 环境配置窗口 - 离线雷达探测修复版】
 // ============================================================================
 @implementation AVCaptureMapWindow { 
     MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; 
@@ -638,7 +607,7 @@ static CLLocation* generatePerfectFakeLocation(void) {
 @end
 
 // ============================================================================
-// 【提前声明所有系统接口，杜绝严苛编译器的拦截报错】
+// 【提前声明所有系统接口】
 // ============================================================================
 @interface CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName;
@@ -687,7 +656,7 @@ static CLLocation* generatePerfectFakeLocation(void) {
 @end
 
 // ============================================================================
-// 【7. 系统底层 Hook 实现 (🌟 接入完美真机级 GPS 数据包)】
+// 【7. 系统底层 Hook 实现】
 // ============================================================================
 @implementation CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName { return g_envSpoofingEnabled && g_fakeCarrierName ? g_fakeCarrierName : [self avs_carrierName]; }
@@ -706,7 +675,7 @@ static CLLocation* generatePerfectFakeLocation(void) {
 
 @implementation CLLocationManager (AVStreamHook)
 - (CLLocation *)avs_location {
-    if (g_envSpoofingEnabled) { return generatePerfectFakeLocation(); } // 🌟 挂载全真 GPS 引擎
+    if (g_envSpoofingEnabled) { return generatePerfectFakeLocation(); } 
     return [self avs_location];
 }
 
@@ -834,7 +803,7 @@ static CLLocation* generatePerfectFakeLocation(void) {
 @end
 
 // ============================================================================
-// 【8. 加载入口 (完成所有主动与被动代理注册)】
+// 【8. 加载入口 (完成所有 Hook 交换绑定)】
 // ============================================================================
 @interface AVStreamLoader : NSObject
 @end
@@ -866,7 +835,6 @@ static CLLocation* generatePerfectFakeLocation(void) {
     if (locClass) {
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(setDelegate:)), class_getInstanceMethod(locClass, @selector(avs_setDelegate:)));
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(location)), class_getInstanceMethod(locClass, @selector(avs_location)));
-        // 🌟 注册主动喂饭引擎 Hook
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(startUpdatingLocation)), class_getInstanceMethod(locClass, @selector(avs_startUpdatingLocation)));
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(requestLocation)), class_getInstanceMethod(locClass, @selector(avs_requestLocation)));
     }
