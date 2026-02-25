@@ -49,8 +49,9 @@ static NSString *g_fakeLocale = nil;
 + (instancetype)sharedHUD;
 @end
 
-@interface AVCaptureMapWindow : UIWindow <MKMapViewDelegate>
+@interface AVCaptureMapWindow : UIWindow <MKMapViewDelegate, UIGestureRecognizerDelegate> // 🌟 修复：手势代理
 + (instancetype)sharedMap;
+- (void)showMapSecurely; // 🌟 修复：安全弹出方法
 @end
 
 // ============================================================================
@@ -134,7 +135,6 @@ static NSString *g_fakeLocale = nil;
 - (void)processDepthBuffer:(AVDepthData *)depthData;
 - (void)loadVideoForCurrentSlot:(NSInteger)slot;
 @end
-
 @implementation AVStreamCoreProcessor
 - (instancetype)init {
     if (self = [super init]) {
@@ -142,26 +142,19 @@ static NSString *g_fakeLocale = nil;
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_pixelTransferSession);
         if (_pixelTransferSession) VTSessionSetProperty(_pixelTransferSession, kVTPixelTransferPropertyKey_ScalingMode, kVTScalingMode_CropSourceToCleanAperture);
         
-        // 🌟 修复 1：移除这里的 loadVideoForCurrentSlot 调用，打破死锁闭环
+        // 🌟 修复死锁：移除这里的自我加载，转由通知和 Manager 驱动
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleChannelChange:) name:@"AVSChannelDidChangeNotification" object:nil];
     }
     return self;
 }
-
-// 🌟 修复 1：改造加载方法，接收参数解耦
 - (void)loadVideoForCurrentSlot:(NSInteger)slot {
     NSString *docPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
     NSString *videoPath = [docPath stringByAppendingPathComponent:[NSString stringWithFormat:@"test%ld.mp4", (long)slot]];
-    [self.decoderLock lock]; 
-    self.decoder = [[AVStreamDecoder alloc] initWithVideoPath:videoPath]; 
-    [self.decoderLock unlock];
+    [self.decoderLock lock]; self.decoder = [[AVStreamDecoder alloc] initWithVideoPath:videoPath]; [self.decoderLock unlock];
 }
-
-// 🌟 修复 1：安全的通知处理
 - (void)handleChannelChange:(NSNotification *)note {
     [self loadVideoForCurrentSlot:[AVStreamManager sharedManager].currentSlot];
 }
-
 - (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer {
     if (![AVStreamManager sharedManager].isEnabled) return;
     [self.decoderLock lock]; CVPixelBufferRef srcPix = [self.decoder copyNextPixelBuffer]; [self.decoderLock unlock];
@@ -187,15 +180,8 @@ static NSString *g_fakeLocale = nil;
 + (instancetype)sharedManager {
     static AVStreamManager *mgr = nil; static dispatch_once_t once;
     dispatch_once(&once, ^{ 
-        mgr = [[AVStreamManager alloc] init]; 
-        mgr.isEnabled = YES; 
-        mgr.isHUDVisible = NO; 
-        mgr.currentSlot = 1; 
-        mgr.displayLayers = [NSHashTable weakObjectsHashTable]; 
-        mgr.processor = [[AVStreamCoreProcessor alloc] init]; 
-        
-        // 🌟 修复 1：在 Manager 完成初始化分配后，主动推入参数加载视频
-        [mgr.processor loadVideoForCurrentSlot:mgr.currentSlot];
+        mgr = [[AVStreamManager alloc] init]; mgr.isEnabled = YES; mgr.isHUDVisible = NO; mgr.currentSlot = 1; mgr.displayLayers = [NSHashTable weakObjectsHashTable]; mgr.processor = [[AVStreamCoreProcessor alloc] init]; 
+        [mgr.processor loadVideoForCurrentSlot:mgr.currentSlot]; // 🌟 安全加载
     });
     return mgr;
 }
@@ -213,31 +199,19 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【4. 隐形环境伪装代理】
+// 【4. 隐形环境伪装代理 (修复野指针)】
 // ============================================================================
 @interface AVCameraSessionProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureDataOutputSynchronizerDelegate, AVCaptureMetadataOutputObjectsDelegate, CLLocationManagerDelegate>
 @property (nonatomic, weak) id target;
 + (instancetype)proxyWithTarget:(id)target;
 @end
-
 @implementation AVCameraSessionProxy
 + (instancetype)proxyWithTarget:(id)target { AVCameraSessionProxy *proxy = [AVCameraSessionProxy alloc]; proxy.target = target; return proxy; }
-
-// 🌟 修复 2：彻底解决野指针导致的 Crash，使用真实签名
-- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { 
-    return [self.target methodSignatureForSelector:sel]; 
-}
-
-// 🌟 修复 2：安全转发，未实现的方法置空返回
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [self.target methodSignatureForSelector:sel]; }
 - (void)forwardInvocation:(NSInvocation *)invocation { 
-    if (self.target && [self.target respondsToSelector:invocation.selector]) {
-        [invocation invokeWithTarget:self.target]; 
-    } else {
-        void *nullPointer = NULL;
-        [invocation setReturnValue:&nullPointer];
-    }
+    if (self.target && [self.target respondsToSelector:invocation.selector]) { [invocation invokeWithTarget:self.target]; }
+    else { void *nullPointer = NULL; [invocation setReturnValue:&nullPointer]; }
 }
-
 - (BOOL)respondsToSelector:(SEL)aSelector {
     if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) || aSelector == @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:) || aSelector == @selector(captureOutput:didOutputMetadataObjects:fromConnection:) || aSelector == @selector(locationManager:didUpdateLocations:)) return YES;
     return [self.target respondsToSelector:aSelector];
@@ -319,14 +293,11 @@ static NSString *g_fakeLocale = nil;
     
     UILabel *sLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 360, 40, 20)]; sLabel.text = @"饱和"; sLabel.textColor = [UIColor lightGrayColor]; sLabel.font = [UIFont systemFontOfSize:12]; [self addSubview:sLabel];
     _saturationSlider = [[UISlider alloc] initWithFrame:CGRectMake(50, 360, 220, 20)]; _saturationSlider.minimumValue = 0.0; _saturationSlider.maximumValue = 2.0; _saturationSlider.value = 1.0; [self addSubview:_saturationSlider];
-    
-    UILabel *tipLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 400, 266, 30)]; tipLabel.text = @"开启去重后导入耗时较长，请耐心等待\n关闭开关则极速复制原视频"; tipLabel.numberOfLines = 2; tipLabel.textColor = [UIColor darkGrayColor]; tipLabel.font = [UIFont systemFontOfSize:10]; tipLabel.textAlignment = NSTextAlignmentCenter; [self addSubview:tipLabel];
 }
 - (void)hideHUD { self.hidden = YES; [AVStreamManager sharedManager].isHUDVisible = NO; [[AVStreamManager sharedManager] updateDisplayLayers]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
 - (void)togglePower:(UISwitch *)sender { [AVStreamManager sharedManager].isEnabled = sender.isOn; [[AVStreamManager sharedManager] updateDisplayLayers]; if (sender.isOn) { _statusLabel.text = [NSString stringWithFormat:@"🟢 V-Cam [CH %ld]", (long)[AVStreamManager sharedManager].currentSlot]; _statusLabel.textColor = [UIColor greenColor]; } else { _statusLabel.text = @"🔴 已禁用"; _statusLabel.textColor = [UIColor redColor]; } UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
 - (void)handlePan:(UIPanGestureRecognizer *)pan { CGPoint trans = [pan translationInView:self]; self.center = CGPointMake(self.center.x + trans.x, self.center.y + trans.y); [pan setTranslation:CGPointZero inView:self]; }
 - (void)channelSwitched:(UIButton *)sender { [AVStreamManager sharedManager].currentSlot = sender.tag; if (_powerSwitch.isOn) { _statusLabel.text = [NSString stringWithFormat:@"🟢 V-Cam [CH %ld]", (long)sender.tag]; } [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSChannelDidChangeNotification" object:nil]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred]; }
-- (void)clearAllVideos { NSString *docPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject]; for (int i = 1; i <= 4; i++) { NSString *path = [docPath stringByAppendingPathComponent:[NSString stringWithFormat:@"test%d.mp4", i]]; [[NSFileManager defaultManager] removeItemAtPath:path error:nil]; } [AVStreamManager sharedManager].currentSlot = 1; [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSChannelDidChangeNotification" object:nil]; _statusLabel.text = @"🗑️ 已清空"; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred]; }
 - (void)handleLongPress:(UILongPressGestureRecognizer *)lp { 
     if (lp.state == UIGestureRecognizerStateBegan) { 
         _pendingSlot = lp.view.tag; UIImagePickerController *picker = [[UIImagePickerController alloc] init]; picker.delegate = self; picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary; picker.mediaTypes = @[@"public.movie"]; picker.videoExportPreset = AVAssetExportPresetPassthrough; 
@@ -369,111 +340,175 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
+
 // ============================================================================
-// 【6. 延迟激活架构：地图标记与基站解析面板】
+// 【6. 环境配置窗口 - 终极触控防拦截与修复版】
 // ============================================================================
 @implementation AVCaptureMapWindow { 
     MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; 
     double _pendingLat; double _pendingLon;
-    NSString *_pendingMCC; NSString *_pendingMNC; NSString *_pendingISO;
-    NSString *_pendingCarrier; NSString *_pendingTZ; NSString *_pendingLocale;
+    NSString *_pMCC; NSString *_pMNC; NSString *_pCarrier; NSString *_pTZ; NSString *_pLocale;
 }
+
 + (instancetype)sharedMap {
-    static AVCaptureMapWindow *map = nil; static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        if (@available(iOS 13.0, *)) { for (UIWindowScene *scene in (NSArray<UIWindowScene *>*)[UIApplication sharedApplication].connectedScenes) { if (scene.activationState == UISceneActivationStateForegroundActive) { map = [[AVCaptureMapWindow alloc] initWithWindowScene:scene]; map.frame = CGRectMake(10, 100, 300, 400); break; } } }
-        if (!map) map = [[AVCaptureMapWindow alloc] initWithFrame:CGRectMake(10, 100, 300, 400)];
-    }); return map;
+    static AVCaptureMapWindow *map = nil; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        map = [[AVCaptureMapWindow alloc] initWithFrame:CGRectMake(10, 100, 310, 480)];
+    }); 
+    return map;
 }
-- (instancetype)initWithFrame:(CGRect)frame { if (self = [super initWithFrame:frame]) { [self setupUI]; } return self; }
-- (instancetype)initWithWindowScene:(UIWindowScene *)windowScene { if (self = [super initWithWindowScene:windowScene]) { [self setupUI]; } return self; }
-- (void)setupUI {
-    self.windowLevel = UIWindowLevelStatusBar + 110; self.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95]; self.layer.cornerRadius = 16; self.layer.masksToBounds = YES; self.hidden = YES;
-    self.rootViewController = [[UIViewController alloc] init];
-    
-    _pendingLat = g_fakeLat; _pendingLon = g_fakeLon;
-    _pendingMCC = g_fakeMCC; _pendingMNC = g_fakeMNC; _pendingISO = g_fakeISO;
-    _pendingCarrier = g_fakeCarrierName; _pendingTZ = g_fakeTZ; _pendingLocale = g_fakeLocale;
 
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 200, 20)]; title.text = @"🌍 环境配置 (需重启生效)"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16]; [self addSubview:title];
-    
-    _envSwitch = [[UISwitch alloc] init]; _envSwitch.transform = CGAffineTransformMakeScale(0.8, 0.8); _envSwitch.frame = CGRectMake(240, 7, 50, 31);
-    _envSwitch.on = g_envSpoofingEnabled;
-    [_envSwitch addTarget:self action:@selector(toggleEnvSpoofing:) forControlEvents:UIControlEventValueChanged]; [self addSubview:_envSwitch];
-    
-    _mapView = [[MKMapView alloc] initWithFrame:CGRectMake(12, 45, 276, 250)]; _mapView.layer.cornerRadius = 8; _mapView.delegate = self;
-    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(addPinToMap:)]; [lp setMinimumPressDuration:0.5]; [_mapView addGestureRecognizer:lp]; [self addSubview:_mapView];
-    
-    _infoLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 305, 276, 40)]; _infoLabel.numberOfLines = 2; _infoLabel.textColor = [UIColor greenColor]; _infoLabel.font = [UIFont systemFontOfSize:12]; _infoLabel.textAlignment = NSTextAlignmentCenter; [self updateInfoLabel]; [self addSubview:_infoLabel];
-    
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem]; closeBtn.frame = CGRectMake(12, 350, 276, 38); closeBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; closeBtn.layer.cornerRadius = 8; [closeBtn setTitle:@"保存并应用 (重启生效)" forState:UIControlStateNormal]; [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16]; [closeBtn addTarget:self action:@selector(closeMap) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:closeBtn];
-    
-    CLLocationCoordinate2D initialCoord = CLLocationCoordinate2DMake(_pendingLat, _pendingLon);
-    if (_pendingLat == 0 && _pendingLon == 0) initialCoord = CLLocationCoordinate2DMake(50.1109, 8.6821); 
-    MKCoordinateRegion region = MKCoordinateRegionMake(initialCoord, MKCoordinateSpanMake(5.0, 5.0));
-    [_mapView setRegion:region animated:NO];
-    MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init]; annotation.coordinate = initialCoord; [_mapView addAnnotation:annotation];
-}
-- (void)toggleEnvSpoofing:(UISwitch *)sender { UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
-- (void)updateInfoLabel {
-    _infoLabel.text = [NSString stringWithFormat:@"预设坐标: %.4f, %.4f\n预设基站: %@ (%@-%@)", _pendingLat, _pendingLon, _pendingCarrier ?: @"未设定", _pendingMCC ?: @"-", _pendingMNC ?: @"-"];
-}
-- (void)addPinToMap:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateBegan) return;
-    CGPoint touchPoint = [gesture locationInView:_mapView];
-    CLLocationCoordinate2D coord = [_mapView convertPoint:touchPoint toCoordinateFromView:_mapView];
-    [_mapView removeAnnotations:_mapView.annotations]; MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init]; annotation.coordinate = coord; [_mapView addAnnotation:annotation];
-    
-    _pendingLat = coord.latitude;
-    _pendingLon = coord.longitude;
-    
-    CLLocation *location = [[CLLocation alloc] initWithLatitude:coord.latitude longitude:coord.longitude];
-    CLGeocoder *geocoder = [[CLGeocoder alloc] init]; _infoLabel.text = @"⏳ 正在解析该国家基站与时区...";
-    
-    [geocoder reverseGeocodeLocation:location completionHandler:^(NSArray<CLPlacemark *> * _Nullable placemarks, NSError * _Nullable error) {
-        if (placemarks.count > 0) {
-            NSString *countryCode = placemarks.firstObject.ISOcountryCode.lowercaseString;
-            NSString *mcc = @"262"; NSString *mnc = @"01"; NSString *carrier = @"Telekom.de"; 
-            NSString *timezone = @"Europe/Berlin"; NSString *locale = @"de_DE";
-            
-            if ([countryCode isEqualToString:@"us"]) { mcc = @"310"; mnc = @"410"; carrier = @"AT&T"; timezone = @"America/New_York"; locale = @"en_US"; }
-            else if ([countryCode isEqualToString:@"gb"]) { mcc = @"234"; mnc = @"15"; carrier = @"Vodafone UK"; timezone = @"Europe/London"; locale = @"en_GB"; }
-            else if ([countryCode isEqualToString:@"fr"]) { mcc = @"208"; mnc = @"01"; carrier = @"Orange F"; timezone = @"Europe/Paris"; locale = @"fr_FR"; }
-            else if ([countryCode isEqualToString:@"it"]) { mcc = @"222"; mnc = @"01"; carrier = @"TIM"; timezone = @"Europe/Rome"; locale = @"it_IT"; }
-            
-            self->_pendingMCC = mcc; self->_pendingMNC = mnc; self->_pendingISO = countryCode; self->_pendingCarrier = carrier;
-            self->_pendingTZ = timezone; self->_pendingLocale = locale;
-        }
-        [self updateInfoLabel];
-        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred];
-    }];
-}
-- (void)closeMap { 
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults setBool:_envSwitch.isOn forKey:@"avs_env_enabled"];
-    [defaults setDouble:_pendingLat forKey:@"avs_env_lat"];
-    [defaults setDouble:_pendingLon forKey:@"avs_env_lon"];
-    if (_pendingMCC) [defaults setObject:_pendingMCC forKey:@"avs_env_mcc"];
-    if (_pendingMNC) [defaults setObject:_pendingMNC forKey:@"avs_env_mnc"];
-    if (_pendingISO) [defaults setObject:_pendingISO forKey:@"avs_env_iso"];
-    if (_pendingCarrier) [defaults setObject:_pendingCarrier forKey:@"avs_env_carrier"];
-    if (_pendingTZ) [defaults setObject:_pendingTZ forKey:@"avs_env_tz"];
-    if (_pendingLocale) [defaults setObject:_pendingLocale forKey:@"avs_env_locale"];
-    [defaults synchronize]; 
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"环境配置已保存" message:@"为防止运行中途环境突变被风控系统捕捉（瞬移作弊），请【立即上滑划掉】彻底关闭本APP。下次打开时，伪装环境将从最底层安全加载！" preferredStyle:UIAlertControllerStyleAlert];
-    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"我知道了，现在去关闭" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+- (instancetype)initWithFrame:(CGRect)f { 
+    if (self = [super initWithFrame:f]) {
+        self.windowLevel = UIWindowLevelStatusBar + 110;
+        self.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.98];
+        self.layer.cornerRadius = 16;
+        self.layer.masksToBounds = YES;
         self.hidden = YES;
-    }];
-    [alert addAction:okAction];
+        self.userInteractionEnabled = YES; 
+
+        UIViewController *root = [[UIViewController alloc] init];
+        root.view.frame = self.bounds;
+        root.view.userInteractionEnabled = YES;
+        self.rootViewController = root;
+
+        [self setupUI];
+        
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        pan.delegate = self; 
+        [self addGestureRecognizer:pan];
+    }
+    return self;
+}
+
+- (BOOL)canBecomeKeyWindow { return YES; }
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hitView = [super hitTest:point withEvent:event];
+    if (hitView) return hitView;
+    return nil;
+}
+
+- (void)showMapSecurely {
+    if (@available(iOS 13.0, *)) {
+        if (!self.windowScene) {
+            for (UIWindowScene *s in (NSArray *)[UIApplication sharedApplication].connectedScenes) {
+                if (s.activationState == UISceneActivationStateForegroundActive) {
+                    self.windowScene = s;
+                    break;
+                }
+            }
+        }
+    }
+    self.hidden = NO;
+    [self makeKeyAndVisible];
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if ([touch.view isDescendantOfView:_mapView] || 
+        [touch.view isKindOfClass:[UIButton class]] || 
+        [touch.view isKindOfClass:[UISwitch class]]) {
+        return NO; 
+    }
+    return YES;
+}
+
+- (void)setupUI {
+    UIView *container = self.rootViewController.view;
+    _pendingLat = g_fakeLat; _pendingLon = g_fakeLon;
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 15, 200, 20)];
+    title.text = @"🌍 环境伪装配置"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16];
+    [container addSubview:title];
     
-    [self.rootViewController presentViewController:alert animated:YES completion:nil];
-    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred]; 
+    _envSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(245, 10, 50, 30)];
+    _envSwitch.on = g_envSpoofingEnabled;
+    [container addSubview:_envSwitch];
+    
+    _mapView = [[MKMapView alloc] initWithFrame:CGRectMake(12, 50, 286, 250)];
+    _mapView.layer.cornerRadius = 8; _mapView.delegate = self;
+    _mapView.userInteractionEnabled = YES;
+    
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(dropPin:)];
+    lp.minimumPressDuration = 0.5; 
+    [_mapView addGestureRecognizer:lp];
+    [container addSubview:_mapView];
+    
+    _infoLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 310, 286, 60)];
+    _infoLabel.numberOfLines = 3; _infoLabel.textColor = [UIColor greenColor]; _infoLabel.font = [UIFont systemFontOfSize:11]; _infoLabel.textAlignment = NSTextAlignmentCenter;
+    [self updateLabel];
+    [container addSubview:_infoLabel];
+    
+    UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem];
+    save.frame = CGRectMake(12, 385, 286, 44);
+    save.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0];
+    save.layer.cornerRadius = 8;
+    [save setTitle:@"保存配置并关闭" forState:UIControlStateNormal];
+    [save setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [save addTarget:self action:@selector(saveAndClose) forControlEvents:UIControlEventTouchUpInside];
+    [container addSubview:save];
+
+    CLLocationCoordinate2D coord = CLLocationCoordinate2DMake(_pendingLat ?: 50.11, _pendingLon ?: 8.68);
+    [_mapView setRegion:MKCoordinateRegionMake(coord, MKCoordinateSpanMake(5, 5)) animated:NO];
+}
+
+- (void)updateLabel {
+    _infoLabel.text = [NSString stringWithFormat:@"坐标: %.4f, %.4f\n运营商: %@ (%@-%@)\n时区: %@", _pendingLat, _pendingLon, _pCarrier?:@"-", _pMCC?:@"-", _pMNC?:@"-", _pTZ?:@"-"];
+}
+
+- (void)dropPin:(UILongPressGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    CGPoint p = [g locationInView:_mapView];
+    CLLocationCoordinate2D c = [_mapView convertPoint:p toCoordinateFromView:_mapView];
+    [_mapView removeAnnotations:_mapView.annotations];
+    MKPointAnnotation *ann = [[MKPointAnnotation alloc] init]; ann.coordinate = c; [_mapView addAnnotation:ann];
+    _pendingLat = c.latitude; _pendingLon = c.longitude;
+    
+    CLGeocoder *geo = [[CLGeocoder alloc] init];
+    [geo reverseGeocodeLocation:[[CLLocation alloc] initWithLatitude:c.latitude longitude:c.longitude] completionHandler:^(NSArray *pls, NSError *err) {
+        if (pls.count > 0) {
+            CLPlacemark *pl = pls.firstObject;
+            NSString *cc = pl.ISOcountryCode.lowercaseString;
+            self->_pMCC = @"262"; self->_pMNC = @"01"; self->_pCarrier = @"Telekom.de"; self->_pTZ = @"Europe/Berlin"; self->_pLocale = @"de_DE";
+            if ([cc isEqualToString:@"us"]) { self->_pMCC = @"310"; self->_pMNC = @"410"; self->_pCarrier = @"AT&T"; self->_pTZ = @"America/New_York"; self->_pLocale = @"en_US"; }
+            else if ([cc isEqualToString:@"fr"]) { self->_pMCC = @"208"; self->_pMNC = @"01"; self->_pCarrier = @"Orange F"; self->_pTZ = @"Europe/Paris"; self->_pLocale = @"fr_FR"; }
+            else if ([cc isEqualToString:@"it"]) { self->_pMCC = @"222"; self->_pMNC = @"01"; self->_pCarrier = @"TIM"; self->_pTZ = @"Europe/Rome"; self->_pLocale = @"it_IT"; }
+            dispatch_async(dispatch_get_main_queue(), ^{ 
+                [self updateLabel]; 
+                UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+                [feedback impactOccurred]; 
+            });
+        }
+    }];
+}
+
+- (void)saveAndClose {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setBool:_envSwitch.on forKey:@"avs_env_enabled"];
+    [ud setDouble:_pendingLat forKey:@"avs_env_lat"];
+    [ud setDouble:_pendingLon forKey:@"avs_env_lon"];
+    if (_pMCC) [ud setObject:_pMCC forKey:@"avs_env_mcc"];
+    if (_pMNC) [ud setObject:_pMNC forKey:@"avs_env_mnc"];
+    if (_pCarrier) [ud setObject:_pCarrier forKey:@"avs_env_carrier"];
+    if (_pTZ) [ud setObject:_pTZ forKey:@"avs_env_tz"];
+    if (_pLocale) [ud setObject:_pLocale forKey:@"avs_env_locale"];
+    [ud synchronize];
+    
+    [self makeKeyWindow];
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"请彻底上滑划掉 App 并重新打开，使底层伪装生效。" preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(id x){ self.hidden = YES; }]];
+    [self.rootViewController presentViewController:a animated:YES completion:nil];
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)p { 
+    CGPoint t = [p translationInView:self]; 
+    self.center = CGPointMake(self.center.x+t.x, self.center.y+t.y); 
+    [p setTranslation:CGPointZero inView:self]; 
 }
 @end
 
 // ============================================================================
-// 【提前声明所有系统接口，杜绝严苛编译器的拦截报错】
+// 【提前声明所有系统接口，杜绝严苛编译器的拦截报错 (找回丢失的接口)】
 // ============================================================================
 @interface CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName;
@@ -520,7 +555,7 @@ static NSString *g_fakeLocale = nil;
 @end
 
 // ============================================================================
-// 【7. 全栈安全底层 Hook (合并去重，只认静态内存，绝对稳定)】
+// 【7. 系统底层 Hook 实现】
 // ============================================================================
 @implementation CTCarrier (AVStreamHook)
 - (NSString *)avs_carrierName { return g_envSpoofingEnabled && g_fakeCarrierName ? g_fakeCarrierName : [self avs_carrierName]; }
@@ -579,29 +614,24 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
-// ============================================================================
-// 【8. 极致安全底层注册引擎 (+load) 与 防吞噬手势】
-// ============================================================================
 @implementation UIWindow (AVStreamHook)
 - (void)avs_setupGestures {
     if (![self isKindOfClass:NSClassFromString(@"AVCaptureHUDWindow")] && ![self isKindOfClass:NSClassFromString(@"AVCaptureMapWindow")] && !objc_getAssociatedObject(self, "_avs_g")) {
         
-        // 🌟 修复 1：改为“三指敲击1次”唤出视频面板
         UITapGestureRecognizer *videoTap = [[UITapGestureRecognizer alloc] initWithTarget:[AVStreamManager sharedManager] action:@selector(handleTwoFingerLongPress:)];
         videoTap.numberOfTouchesRequired = 3; 
         videoTap.numberOfTapsRequired = 1;
         videoTap.cancelsTouchesInView = NO;
         videoTap.delaysTouchesBegan = NO;
-        videoTap.delegate = [AVStreamManager sharedManager]; // 🌟 核心防吞噬代理！
+        videoTap.delegate = [AVStreamManager sharedManager]; 
         [self addGestureRecognizer:videoTap];
         
-        // 🌟 修复 2：改为“四指敲击1次”唤出地图面板
         UITapGestureRecognizer *mapTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showMapPanel:)];
         mapTap.numberOfTouchesRequired = 4;
         mapTap.numberOfTapsRequired = 1;
         mapTap.cancelsTouchesInView = NO;
         mapTap.delaysTouchesBegan = NO;
-        mapTap.delegate = [AVStreamManager sharedManager]; // 🌟 核心防吞噬代理！
+        mapTap.delegate = [AVStreamManager sharedManager]; 
         [self addGestureRecognizer:mapTap];
         
         objc_setAssociatedObject(self, "_avs_g", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -613,7 +643,6 @@ static NSString *g_fakeLocale = nil;
     [self avs_setupGestures];
 }
 
-// 🌟 双重保险：拦截 makeKeyAndVisible
 - (void)avs_makeKeyAndVisible {
     [self avs_makeKeyAndVisible];
     [self avs_setupGestures];
@@ -621,13 +650,15 @@ static NSString *g_fakeLocale = nil;
 
 - (void)showMapPanel:(UIGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateRecognized) { 
-        [AVCaptureMapWindow sharedMap].hidden = NO; 
+        // 🌟 核心：使用安全弹出机制
+        [[AVCaptureMapWindow sharedMap] showMapSecurely];
         UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; 
         [feedback impactOccurred]; 
     }
 }
 @end
 
+// 🌟 修复：找回用于 TikTok 高级同步流的 Hook
 @implementation AVCaptureVideoDataOutput (AVStreamHook)
 - (void)avs_setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"AVCameraSessionProxy")]) { 
@@ -656,6 +687,9 @@ static NSString *g_fakeLocale = nil;
 }
 @end
 
+// ============================================================================
+// 【8. 加载入口 (找回丢失的全部 Hook 交换)】
+// ============================================================================
 @interface AVStreamLoader : NSObject
 @end
 @implementation AVStreamLoader
@@ -675,10 +709,7 @@ static NSString *g_fakeLocale = nil;
         g_envSpoofingEnabled = NO;
     }
 
-    // 🌟 修复 3：移除了无用的 dlopen 强加载，防止找不到 dylib 报错
-    
     method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(becomeKeyWindow)), class_getInstanceMethod([UIWindow class], @selector(avs_becomeKeyWindow)));
-    // 🌟 双重保证：注入时机覆盖面更广
     method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible)), class_getInstanceMethod([UIWindow class], @selector(avs_makeKeyAndVisible)));
     
     Class vdoClass = NSClassFromString(@"AVCaptureVideoDataOutput"); if (vdoClass) method_exchangeImplementations(class_getInstanceMethod(vdoClass, @selector(setSampleBufferDelegate:queue:)), class_getInstanceMethod(vdoClass, @selector(avs_setSampleBufferDelegate:queue:)));
