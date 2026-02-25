@@ -45,7 +45,6 @@ static NSString *g_fakeLocale = nil;
 
 - (void)updateDisplayLayers;
 - (void)saveEnvironmentSettings;
-- (void)syncGlobalsToProperties;
 @end
 
 @interface VCAMHUDWindow : UIWindow <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
@@ -376,7 +375,7 @@ static NSString *g_fakeLocale = nil;
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem]; closeBtn.frame = CGRectMake(12, 350, 276, 38); closeBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; closeBtn.layer.cornerRadius = 8; [closeBtn setTitle:@"保存并关闭" forState:UIControlStateNormal]; [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16]; [closeBtn addTarget:self action:@selector(closeMap) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:closeBtn];
     
     CLLocationCoordinate2D initialCoord = CLLocationCoordinate2DMake(g_fakeLat, g_fakeLon);
-    if (g_fakeLat == 0 && g_fakeLon == 0) initialCoord = CLLocationCoordinate2DMake(50.1109, 8.6821); // 默认法兰克福
+    if (g_fakeLat == 0 && g_fakeLon == 0) initialCoord = CLLocationCoordinate2DMake(50.1109, 8.6821); 
     MKCoordinateRegion region = MKCoordinateRegionMake(initialCoord, MKCoordinateSpanMake(5.0, 5.0));
     [_mapView setRegion:region animated:NO];
     MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init]; annotation.coordinate = initialCoord; [_mapView addAnnotation:annotation];
@@ -527,7 +526,6 @@ static NSString *g_fakeLocale = nil;
 @end
 @implementation VCAMLoader
 + (void)load {
-    // 🌟 在进程启动的第一毫秒，安全读取配置存入静态 C 内存中，绝对不触发死锁！
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     g_envSpoofingEnabled = [defaults boolForKey:@"vcam_env_enabled"];
     g_fakeLat = [defaults doubleForKey:@"vcam_env_lat"];
@@ -539,7 +537,6 @@ static NSString *g_fakeLocale = nil;
     g_fakeTZ = [defaults stringForKey:@"vcam_env_tz"] ?: @"Europe/Berlin";
     g_fakeLocale = [defaults stringForKey:@"vcam_env_locale"] ?: @"de_DE";
 
-    // 🌟 新增修复：强制将地图依赖库读入内存，防止 App 因为没有集成 MapKit 而崩溃
     dlopen("/System/Library/Frameworks/MapKit.framework/MapKit", RTLD_NOW);
     dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW);
     dlopen("/System/Library/Frameworks/CoreLocation.framework/CoreLocation", RTLD_NOW);
