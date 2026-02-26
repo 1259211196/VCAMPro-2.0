@@ -1,10 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
-#import <CoreMedia/CoreMedia.h>
-#import <CoreVideo/CoreVideo.h>
-#import <VideoToolbox/VideoToolbox.h>
-#import <CoreImage/CoreImage.h>
 #import <CoreLocation/CoreLocation.h>
 #import <MapKit/MapKit.h>
 #import <CoreTelephony/CTCarrier.h>
@@ -36,7 +32,24 @@ extern "C" {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations" 
 
 // ============================================================================
-// 【0. 极致安全的 C 语言静态缓存 & 动态真机硬件抓取】
+// 【0. 工业级安全交换算法 (防止 AVAsset 类簇穿透)】
+// ============================================================================
+static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) {
+    if (!cls) return;
+    Method originalMethod = class_getInstanceMethod(cls, originalSelector);
+    Method swizzledMethod = class_getInstanceMethod(cls, swizzledSelector);
+    if (!originalMethod || !swizzledMethod) return;
+    
+    BOOL didAddMethod = class_addMethod(cls, originalSelector, method_getImplementation(swizzledMethod), method_getTypeEncoding(swizzledMethod));
+    if (didAddMethod) {
+        class_replaceMethod(cls, swizzledSelector, method_getImplementation(originalMethod), method_getTypeEncoding(originalMethod));
+    } else {
+        method_exchangeImplementations(originalMethod, swizzledMethod);
+    }
+}
+
+// ============================================================================
+// 【1. 极致安全的 C 语言静态缓存 & 动态真机硬件抓取】
 // ============================================================================
 static BOOL g_envSpoofingEnabled = NO;
 static double g_fakeLat = 0.0;
@@ -111,266 +124,13 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 }
 
 // ============================================================================
-// 【1. 伪装系统大管家】
+// 【2. 环境配置窗口 (离线一键预设 + 物理防线控制)】
 // ============================================================================
-@class AVCaptureHUDWindow, AVCaptureMapWindow, AVStreamCoreProcessor;
-
-@interface AVStreamManager : NSObject <UIGestureRecognizerDelegate>
-+ (instancetype)sharedManager;
-@property (nonatomic, assign) BOOL isEnabled; 
-@property (nonatomic, assign) BOOL isHUDVisible; 
-@property (nonatomic, strong) AVStreamCoreProcessor *processor;
-@end
-
-@interface AVCaptureHUDWindow : UIWindow <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
-+ (instancetype)sharedHUD;
-@end
-
 @interface AVCaptureMapWindow : UIWindow <MKMapViewDelegate, UIGestureRecognizerDelegate>
 + (instancetype)sharedMap;
 - (void)showMapSecurely; 
 @end
 
-// ============================================================================
-// 【2. 纯净视频转码导入引擎】
-// ============================================================================
-@interface AVStreamPreprocessor : NSObject
-+ (void)processVideoAtURL:(NSURL *)sourceURL toDestination:(NSString *)destPath completion:(void(^)(BOOL success, NSError *error))completion;
-@end
-
-@implementation AVStreamPreprocessor
-+ (void)processVideoAtURL:(NSURL *)sourceURL toDestination:(NSString *)destPath completion:(void(^)(BOOL success, NSError *error))completion {
-    AVAsset *asset = [AVAsset assetWithURL:sourceURL];
-    AVAssetExportSession *exportSession = [[AVAssetExportSession alloc] initWithAsset:asset presetName:AVAssetExportPresetHighestQuality];
-    exportSession.outputURL = [NSURL fileURLWithPath:destPath];
-    exportSession.outputFileType = AVFileTypeMPEG4;
-    exportSession.shouldOptimizeForNetworkUse = YES; 
-    
-    // 🌟 核心触发点：强制赋予空元数据，主动唤醒并触发底层的写护盾！
-    exportSession.metadata = @[]; 
-
-    [exportSession exportAsynchronouslyWithCompletionHandler:^{
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (exportSession.status == AVAssetExportSessionStatusCompleted) { if (completion) completion(YES, nil); } 
-            else { if (completion) completion(NO, exportSession.error); }
-        });
-    }];
-}
-@end
-
-// ============================================================================
-// 【3. 高性能底层推流引擎】
-// ============================================================================
-@interface AVStreamDecoder : NSObject
-- (instancetype)initWithVideoPath:(NSString *)path;
-- (CVPixelBufferRef)copyNextPixelBuffer;
-@end
-@implementation AVStreamDecoder { AVAssetReader *_assetReader; AVAssetReaderOutput *_trackOutput; NSString *_videoPath; }
-- (instancetype)initWithVideoPath:(NSString *)path { if (self = [super init]) { _videoPath = path; [self setupReader]; } return self; }
-- (void)setupReader {
-    if (!_videoPath) return;
-    if (_assetReader) { [_assetReader cancelReading]; _assetReader = nil; _trackOutput = nil; }
-    if (![[NSFileManager defaultManager] fileExistsAtPath:_videoPath]) return;
-    AVAsset *asset = [AVAsset assetWithURL:[NSURL fileURLWithPath:_videoPath]];
-    _assetReader = [AVAssetReader assetReaderWithAsset:asset error:nil];
-    AVAssetTrack *videoTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
-    if (!videoTrack || !_assetReader) return;
-    NSDictionary *settings = @{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)};
-    AVMutableVideoComposition *videoComp = nil;
-    @try { videoComp = (AVMutableVideoComposition *)[AVVideoComposition videoCompositionWithPropertiesOfAsset:asset]; } @catch (NSException *e) {}
-    if (videoComp) { AVAssetReaderVideoCompositionOutput *compOut = [AVAssetReaderVideoCompositionOutput assetReaderVideoCompositionOutputWithVideoTracks:@[videoTrack] videoSettings:settings]; compOut.videoComposition = videoComp; _trackOutput = (AVAssetReaderOutput *)compOut;
-    } else { _trackOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:videoTrack outputSettings:settings]; }
-    if ([_assetReader canAddOutput:_trackOutput]) { [_assetReader addOutput:_trackOutput]; [_assetReader startReading]; }
-}
-- (CVPixelBufferRef)copyNextPixelBuffer {
-    if (!_assetReader) return NULL;
-    if (_assetReader.status == AVAssetReaderStatusCompleted) [self setupReader];
-    if (_assetReader.status == AVAssetReaderStatusReading) { CMSampleBufferRef sbuf = [_trackOutput copyNextSampleBuffer]; if (sbuf) { CVPixelBufferRef pix = CMSampleBufferGetImageBuffer(sbuf); if (pix) CVPixelBufferRetain(pix); CFRelease(sbuf); return pix; } }
-    return NULL;
-}
-@end
-
-@interface AVStreamCoreProcessor : NSObject
-@property (nonatomic, strong) AVStreamDecoder *decoder;
-@property (nonatomic, assign) VTPixelTransferSessionRef pixelTransferSession;
-@property (nonatomic, strong) NSLock *decoderLock;
-@property (nonatomic, assign) CVPixelBufferRef lastPixelBuffer;
-- (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer;
-- (void)processDepthBuffer:(AVDepthData *)depthData;
-- (void)loadVideo;
-@end
-
-@implementation AVStreamCoreProcessor
-- (instancetype)init {
-    if (self = [super init]) {
-        _decoderLock = [[NSLock alloc] init]; _lastPixelBuffer = NULL; 
-        VTPixelTransferSessionCreate(kCFAllocatorDefault, &_pixelTransferSession);
-        if (_pixelTransferSession) VTSessionSetProperty(_pixelTransferSession, kVTPixelTransferPropertyKey_ScalingMode, kVTScalingMode_CropSourceToCleanAperture);
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleVideoChange:) name:@"AVSVideoDidChangeNotification" object:nil];
-    } return self;
-}
-- (void)loadVideo {
-    NSString *docPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    NSString *videoPath = [docPath stringByAppendingPathComponent:@"vcam_video.mp4"]; 
-    [self.decoderLock lock]; self.decoder = [[AVStreamDecoder alloc] initWithVideoPath:videoPath]; 
-    if (_lastPixelBuffer) { CVPixelBufferRelease(_lastPixelBuffer); _lastPixelBuffer = NULL; }
-    [self.decoderLock unlock];
-}
-- (void)handleVideoChange:(NSNotification *)note { [self loadVideo]; }
-- (void)processSampleBuffer:(CMSampleBufferRef)sampleBuffer {
-    if (![AVStreamManager sharedManager].isEnabled) return;
-    [self.decoderLock lock]; CVPixelBufferRef srcPix = [self.decoder copyNextPixelBuffer]; [self.decoderLock unlock];
-    if (srcPix) { if (_lastPixelBuffer) CVPixelBufferRelease(_lastPixelBuffer); _lastPixelBuffer = CVPixelBufferRetain(srcPix);
-    } else { if (_lastPixelBuffer) srcPix = CVPixelBufferRetain(_lastPixelBuffer); }
-    if (srcPix) { CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
-        if (dstPix && self.pixelTransferSession) VTPixelTransferSessionTransferImage(self.pixelTransferSession, srcPix, dstPix);
-        CVPixelBufferRelease(srcPix); 
-    } else {
-        CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
-        if (dstPix && CVPixelBufferLockBaseAddress(dstPix, 0) == kCVReturnSuccess) {
-            size_t size = CVPixelBufferGetBytesPerRow(dstPix) * CVPixelBufferGetHeight(dstPix);
-            memset(CVPixelBufferGetBaseAddress(dstPix), 0, size); CVPixelBufferUnlockBaseAddress(dstPix, 0);
-        }
-    }
-}
-- (void)processDepthBuffer:(AVDepthData *)depthData {
-    if (!depthData) return; CVPixelBufferRef depthMap = [depthData depthDataMap]; if (!depthMap) return;
-    if (CVPixelBufferLockBaseAddress(depthMap, 0) == kCVReturnSuccess) { void *baseAddress = CVPixelBufferGetBaseAddress(depthMap); if (baseAddress) { size_t size = CVPixelBufferGetBytesPerRow(depthMap) * CVPixelBufferGetHeight(depthMap); memset(baseAddress, 0, size); } CVPixelBufferUnlockBaseAddress(depthMap, 0); }
-}
-- (void)dealloc { 
-    [[NSNotificationCenter defaultCenter] removeObserver:self]; 
-    if (_pixelTransferSession) { VTPixelTransferSessionInvalidate(_pixelTransferSession); CFRelease(_pixelTransferSession); }
-    if (_lastPixelBuffer) { CVPixelBufferRelease(_lastPixelBuffer); _lastPixelBuffer = NULL; } 
-}
-@end
-
-@implementation AVStreamManager
-+ (instancetype)sharedManager {
-    static AVStreamManager *mgr = nil; static dispatch_once_t once;
-    dispatch_once(&once, ^{ 
-        mgr = [[AVStreamManager alloc] init]; 
-        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        if ([ud objectForKey:@"avs_video_enabled"] != nil) { mgr.isEnabled = [ud boolForKey:@"avs_video_enabled"]; } else { mgr.isEnabled = YES; }
-        mgr.isHUDVisible = NO; 
-        mgr.processor = [[AVStreamCoreProcessor alloc] init]; [mgr.processor loadVideo]; 
-    }); return mgr;
-}
-- (void)handleTwoFingerLongPress:(UIGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateRecognized || gesture.state == UIGestureRecognizerStateBegan) { 
-        self.isHUDVisible = YES; [AVCaptureHUDWindow sharedHUD].hidden = NO; 
-        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium]; [feedback impactOccurred]; 
-    }
-}
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer { return YES; }
-@end
-
-// ============================================================================
-// 【4. 隐形环境伪装代理】
-// ============================================================================
-@interface AVCameraSessionProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureDataOutputSynchronizerDelegate, AVCaptureMetadataOutputObjectsDelegate, CLLocationManagerDelegate>
-@property (nonatomic, weak) id target;
-+ (instancetype)proxyWithTarget:(id)target;
-@end
-@implementation AVCameraSessionProxy
-+ (instancetype)proxyWithTarget:(id)target { AVCameraSessionProxy *proxy = [AVCameraSessionProxy alloc]; proxy.target = target; return proxy; }
-- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [self.target methodSignatureForSelector:sel]; }
-- (void)forwardInvocation:(NSInvocation *)invocation { 
-    if (self.target && [self.target respondsToSelector:invocation.selector]) { [invocation invokeWithTarget:self.target]; } else { void *nullPointer = NULL; [invocation setReturnValue:&nullPointer]; }
-}
-- (BOOL)respondsToSelector:(SEL)aSelector {
-    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) || aSelector == @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:) || aSelector == @selector(captureOutput:didOutputMetadataObjects:fromConnection:) || aSelector == @selector(locationManager:didUpdateLocations:) || aSelector == @selector(locationManager:didUpdateToLocation:fromLocation:)) return YES;
-    return [self.target respondsToSelector:aSelector];
-}
-- (Class)class { return [self.target class]; } - (Class)superclass { return [self.target superclass]; } - (BOOL)isKindOfClass:(Class)aClass { return [self.target isKindOfClass:aClass]; } - (BOOL)conformsToProtocol:(Protocol *)aProtocol { return [self.target conformsToProtocol:aProtocol]; }
-
-- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-    @autoreleasepool { [[AVStreamManager sharedManager].processor processSampleBuffer:sampleBuffer]; if ([self.target respondsToSelector:_cmd]) [self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection]; }
-}
-- (void)dataOutputSynchronizer:(AVCaptureDataOutputSynchronizer *)synchronizer didOutputSynchronizedDataCollection:(AVCaptureSynchronizedDataCollection *)synchronizedDataCollection {
-    @autoreleasepool {
-        for (AVCaptureOutput *out in synchronizer.dataOutputs) {
-            if ([out isKindOfClass:NSClassFromString(@"AVCaptureVideoDataOutput")]) { AVCaptureSynchronizedData *syncData = [synchronizedDataCollection synchronizedDataForCaptureOutput:out]; if ([syncData respondsToSelector:@selector(sampleBuffer)]) { CMSampleBufferRef sbuf = ((CMSampleBufferRef (*)(id, SEL))objc_msgSend)(syncData, @selector(sampleBuffer)); if (sbuf) [[AVStreamManager sharedManager].processor processSampleBuffer:sbuf]; } } 
-            else if ([out isKindOfClass:NSClassFromString(@"AVCaptureDepthDataOutput")] && [AVStreamManager sharedManager].isEnabled) { AVCaptureSynchronizedData *syncData = [synchronizedDataCollection synchronizedDataForCaptureOutput:out]; if ([syncData respondsToSelector:@selector(depthData)]) { AVDepthData *depthData = ((AVDepthData *(*)(id, SEL))objc_msgSend)(syncData, @selector(depthData)); [[AVStreamManager sharedManager].processor processDepthBuffer:depthData]; } }
-        }
-        if ([self.target respondsToSelector:_cmd]) [self.target dataOutputSynchronizer:synchronizer didOutputSynchronizedDataCollection:synchronizedDataCollection];
-    }
-}
-- (void)captureOutput:(AVCaptureOutput *)output didOutputMetadataObjects:(NSArray *)metadataObjects fromConnection:(AVCaptureConnection *)connection {
-    @autoreleasepool { NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:metadataObjects.count]; BOOL shouldFilter = ([AVStreamManager sharedManager].isEnabled && [AVStreamManager sharedManager].isHUDVisible); for (AVMetadataObject *obj in metadataObjects) { if (shouldFilter && [obj.type isEqualToString:AVMetadataObjectTypeFace]) continue; [filtered addObject:obj]; } if ([self.target respondsToSelector:_cmd]) [self.target captureOutput:output didOutputMetadataObjects:filtered fromConnection:connection]; }
-}
-- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations { if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateLocations:locations]; }
-- (void)locationManager:(CLLocationManager *)manager didUpdateToLocation:(CLLocation *)newLocation fromLocation:(CLLocation *)oldLocation { if ([self.target respondsToSelector:_cmd]) [self.target locationManager:manager didUpdateToLocation:newLocation fromLocation:oldLocation]; }
-@end
-
-// ============================================================================
-// 【5. HUD 控制面板】
-// ============================================================================
-@implementation AVCaptureHUDWindow { 
-    UILabel *_statusLabel; UISwitch *_powerSwitch; 
-}
-+ (instancetype)sharedHUD {
-    static AVCaptureHUDWindow *hud = nil; static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        if (@available(iOS 13.0, *)) { for (UIWindowScene *scene in (NSArray<UIWindowScene *>*)[UIApplication sharedApplication].connectedScenes) { if (scene.activationState == UISceneActivationStateForegroundActive) { hud = [[AVCaptureHUDWindow alloc] initWithWindowScene:scene]; hud.frame = CGRectMake(20, 80, 290, 105); break; } } }
-        if (!hud) hud = [[AVCaptureHUDWindow alloc] initWithFrame:CGRectMake(20, 80, 290, 105)];
-    }); return hud;
-}
-- (instancetype)initWithFrame:(CGRect)frame { if (self = [super initWithFrame:frame]) { [self commonInit]; } return self; }
-- (instancetype)initWithWindowScene:(UIWindowScene *)windowScene { if (self = [super initWithWindowScene:windowScene]) { [self commonInit]; } return self; }
-- (void)commonInit {
-    self.windowLevel = UIWindowLevelStatusBar + 100; self.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85]; self.layer.cornerRadius = 16; self.layer.masksToBounds = YES; self.hidden = YES; 
-    [self setupUI]; UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]; [self addGestureRecognizer:pan];
-}
-- (void)setupUI {
-    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, 180, 20)]; _statusLabel.font = [UIFont boldSystemFontOfSize:14]; [self addSubview:_statusLabel];
-    _powerSwitch = [[UISwitch alloc] init]; _powerSwitch.transform = CGAffineTransformMakeScale(0.8, 0.8); _powerSwitch.frame = CGRectMake(230, 7, 50, 31); 
-    _powerSwitch.on = [AVStreamManager sharedManager].isEnabled;
-    if (_powerSwitch.on) { _statusLabel.text = @"🟢 视频替换 [工作态]"; _statusLabel.textColor = [UIColor greenColor]; } else { _statusLabel.text = @"🔴 视频替换 [直通态]"; _statusLabel.textColor = [UIColor redColor]; }
-    [_powerSwitch addTarget:self action:@selector(togglePower:) forControlEvents:UIControlEventValueChanged]; [self addSubview:_powerSwitch];
-    
-    UIButton *importBtn = [UIButton buttonWithType:UIButtonTypeSystem]; importBtn.frame = CGRectMake(12, 45, 195, 44); importBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0]; importBtn.layer.cornerRadius = 8; [importBtn setTitle:@"📁 导入纯净视频" forState:UIControlStateNormal]; [importBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; importBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15]; [importBtn addTarget:self action:@selector(openVideoPicker) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:importBtn];
-    
-    UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem]; clearBtn.frame = CGRectMake(215, 45, 63, 44); clearBtn.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:1.0]; clearBtn.layer.cornerRadius = 8; [clearBtn setTitle:@"隐藏" forState:UIControlStateNormal]; [clearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14]; [clearBtn addTarget:self action:@selector(hideHUD) forControlEvents:UIControlEventTouchUpInside]; [self addSubview:clearBtn];
-}
-- (void)hideHUD { self.hidden = YES; [AVStreamManager sharedManager].isHUDVisible = NO; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; }
-- (void)togglePower:(UISwitch *)sender { 
-    [AVStreamManager sharedManager].isEnabled = sender.isOn; 
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults]; [ud setBool:sender.isOn forKey:@"avs_video_enabled"]; [ud synchronize];
-    if (sender.isOn) { _statusLabel.text = @"🟢 视频替换 [工作态]"; _statusLabel.textColor = [UIColor greenColor]; } else { _statusLabel.text = @"🔴 视频替换 [直通态]"; _statusLabel.textColor = [UIColor redColor]; } 
-    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [feedback impactOccurred]; 
-}
-- (void)handlePan:(UIPanGestureRecognizer *)pan { CGPoint trans = [pan translationInView:self]; self.center = CGPointMake(self.center.x + trans.x, self.center.y + trans.y); [pan setTranslation:CGPointZero inView:self]; }
-- (void)openVideoPicker {
-    UIImagePickerController *picker = [[UIImagePickerController alloc] init]; picker.delegate = self; picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary; picker.mediaTypes = @[@"public.movie"]; picker.videoExportPreset = AVAssetExportPresetPassthrough; 
-    UIWindow *foundWindow = nil; 
-    if (@available(iOS 13.0, *)) { for (UIWindowScene *scene in (NSArray<UIWindowScene *>*)[UIApplication sharedApplication].connectedScenes) { if (scene.activationState == UISceneActivationStateForegroundActive) { for (UIWindow *window in scene.windows) { if (window.isKeyWindow || window.windowLevel == UIWindowLevelNormal) { foundWindow = window; break; } } } if (foundWindow) break; } } 
-    UIViewController *root = foundWindow.rootViewController; while (root.presentedViewController) root = root.presentedViewController; 
-    if (root) [root presentViewController:picker animated:YES completion:nil]; 
-}
-- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info { 
-    NSURL *url = info[UIImagePickerControllerMediaURL]; 
-    if (url) { 
-        NSString *dest = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject] stringByAppendingPathComponent:@"vcam_video.mp4"]; 
-        [[NSFileManager defaultManager] removeItemAtPath:dest error:nil]; 
-        self->_statusLabel.text = @"⏳ 纯净转码并写入护盾中..."; self->_statusLabel.textColor = [UIColor orangeColor];
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{ 
-            [AVStreamPreprocessor processVideoAtURL:url toDestination:dest completion:^(BOOL success, NSError *error) {
-                dispatch_async(dispatch_get_main_queue(), ^{ 
-                    if (success) { 
-                        [[NSNotificationCenter defaultCenter] postNotificationName:@"AVSVideoDidChangeNotification" object:nil]; 
-                        self->_statusLabel.text = @"🟢 视频替换 [工作态]"; self->_statusLabel.textColor = [UIColor greenColor];
-                    } else { self->_statusLabel.text = @"❌ 导入失败"; self->_statusLabel.textColor = [UIColor redColor]; } 
-                });
-            }];
-        }); 
-    } 
-    [picker dismissViewControllerAnimated:YES completion:nil]; 
-}
-@end
-
-// ============================================================================
-// 【6. 环境配置窗口 (离线一键预设)】
-// ============================================================================
 @implementation AVCaptureMapWindow { 
     MKMapView *_mapView; UILabel *_infoLabel; UISwitch *_envSwitch; 
     double _pendingLat; double _pendingLon;
@@ -383,6 +143,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event { UIView *hitView = [super hitTest:point withEvent:event]; if (hitView) return hitView; return nil; }
 - (void)showMapSecurely { if (@available(iOS 13.0, *)) { if (!self.windowScene) { for (UIWindowScene *s in (NSArray *)[UIApplication sharedApplication].connectedScenes) { if (s.activationState == UISceneActivationStateForegroundActive) { self.windowScene = s; break; } } } } self.hidden = NO; [self makeKeyAndVisible]; }
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch { if ([touch.view isDescendantOfView:_mapView] || [touch.view isKindOfClass:[UIButton class]] || [touch.view isKindOfClass:[UISwitch class]]) { return NO; } return YES; }
+
 - (void)setupUI {
     UIView *container = self.rootViewController.view;
     _pendingLat = g_fakeLat != 0.0 ? g_fakeLat : 50.1109; _pendingLon = g_fakeLon != 0.0 ? g_fakeLon : 8.6821; 
@@ -393,6 +154,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 15, 200, 20)]; title.text = @"🌍 环境硬件伪装引擎"; title.textColor = [UIColor whiteColor]; title.font = [UIFont boldSystemFontOfSize:16]; [container addSubview:title];
     _envSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(245, 10, 50, 30)]; _envSwitch.on = g_envSpoofingEnabled; [container addSubview:_envSwitch];
     
+    // 🌟 离线一键预设矩阵（飞行模式专用）
     NSArray *flags = @[@"🇺🇸 美", @"🇬🇧 英", @"🇫🇷 法", @"🇩🇪 德", @"🇮🇹 意"];
     for (int i = 0; i < 5; i++) {
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem]; btn.frame = CGRectMake(12 + i * (54 + 2), 45, 54, 32); btn.backgroundColor = [UIColor colorWithWhite:0.25 alpha:1.0]; btn.layer.cornerRadius = 6; btn.titleLabel.font = [UIFont systemFontOfSize:13]; [btn setTitle:flags[i] forState:UIControlStateNormal]; [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal]; btn.tag = i; [btn addTarget:self action:@selector(quickSelectCountry:) forControlEvents:UIControlEventTouchUpInside]; [container addSubview:btn];
@@ -464,7 +226,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 - (NSDictionary<NSString *,CTCarrier *> *)avs_serviceSubscriberCellularProviders;
 @end
 @interface CLLocationManager (AVStreamHook)
-- (CLLocation *)avs_location; - (void)avs_setDelegate:(id<CLLocationManagerDelegate>)delegate; - (void)avs_startUpdatingLocation; - (void)avs_requestLocation;
+- (CLLocation *)avs_location; - (void)avs_startUpdatingLocation; - (void)avs_requestLocation;
 @end
 @interface CLLocation (AVStreamHook)
 - (CLLocationCoordinate2D)avs_coordinate; - (CLLocationDistance)avs_altitude; - (CLLocationAccuracy)avs_horizontalAccuracy; - (CLLocationAccuracy)avs_verticalAccuracy; - (CLLocationSpeed)avs_speed; - (CLLocationDirection)avs_course;
@@ -478,21 +240,12 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @interface UIWindow (AVStreamHook)
 - (void)avs_becomeKeyWindow; - (void)avs_makeKeyAndVisible; - (void)avs_setupGestures;
 @end
-@interface AVCaptureVideoDataOutput (AVStreamHook)
-- (void)avs_setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue;
-@end
-@interface AVCaptureDataOutputSynchronizer (AVStreamHook)
-- (void)avs_setDelegate:(id)delegate queue:(dispatch_queue_t)queue;
-@end
-@interface AVCaptureMetadataOutput (AVStreamHook)
-- (void)avs_setMetadataObjectsDelegate:(id)delegate queue:(dispatch_queue_t)queue;
-@end
 @interface NEHotspotNetwork (AVStreamHook)
 + (void)avs_fetchCurrentWithCompletionHandler:(void (^)(NEHotspotNetwork * _Nullable currentNetwork))completionHandler;
 - (NSString *)avs_SSID; - (NSString *)avs_BSSID;
 @end
 
-// 🌟 完美融合声明：元数据底层拦截接口
+// 🌟 护盾声明
 @interface AVAssetExportSession (AVStreamHook)
 - (void)vcam_setMetadata:(NSArray<AVMetadataItem *> *)metadata;
 @end
@@ -502,10 +255,10 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @end
 
 // ============================================================================
-// 【7. 系统底层 Hook 实现 (含 Fishhook C 函数接管 及 元数据真机护盾)】
+// 【3. 系统底层 Hook 实现 (真机护盾 + 网络位置劫持)】
 // ============================================================================
 
-// 🌟 完美融合实现：【写护盾】强制覆盖写入真实硬件信息 (修复了遗失伪装GPS位置的隐患)
+// 🌟 【写护盾】强制覆盖写入真实硬件信息 
 @implementation AVAssetExportSession (AVStreamHook)
 - (void)vcam_setMetadata:(NSArray<AVMetadataItem *> *)metadata {
     NSMutableArray *pureMetadata = [NSMutableArray array];
@@ -516,19 +269,16 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 
     void (^addMeta)(NSString *, NSString *, id) = ^(NSString *keySpace, NSString *key, id value) {
         AVMutableMetadataItem *item = [[AVMutableMetadataItem alloc] init];
-        item.keySpace = keySpace;
-        item.key = key;
-        item.value = value;
+        item.keySpace = keySpace; item.key = key; item.value = value;
         [pureMetadata addObject:item];
     };
 
-    // 抛弃原始数据，强制注入无死角的真机数据
     addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeyMake, @"Apple");
     addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeyModel, myModel);
     addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeySoftware, myVer);
     addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeyCreationDate, myDate);
     
-    // 🌟 核心优化：补回丢失的物理位置对齐！确保视频自带你伪装环境的合法 EXIF 坐标
+    // 补回物理位置对齐
     if (g_envSpoofingEnabled && g_fakeLat != 0.0) {
         addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeyLocation, [NSString stringWithFormat:@"%+08.4f%+09.4f/", g_fakeLat, g_fakeLon]);
     }
@@ -537,30 +287,24 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 }
 @end
 
-// 🌟 完美融合实现：【读护盾】(0消耗版) 精准清洗上传视频的元数据
+// 🌟 【读护盾】(0消耗版) 精准清洗上传视频的元数据
 @implementation AVAsset (AVStreamHook)
 - (NSArray<AVMetadataItem *> *)vcam_metadata {
-    // 高速放行通道
     if ([self isKindOfClass:[AVURLAsset class]]) {
         NSURL *url = [(AVURLAsset *)self URL];
-        if (![url isFileURL]) {
-            return [self vcam_metadata]; // 放行 HTTP/HTTPS 视频流
-        }
-        NSString *path = [url path];
-        if ([path containsString:@"/Library/Caches/"] || [path containsString:@"/tmp/aweme"]) {
-            return [self vcam_metadata]; // 放行 TikTok 缓存文件
+        if (![url isFileURL] || [[url path] containsString:@"/Library/Caches/"] || [[url path] containsString:@"/tmp/aweme"]) {
+            return [self vcam_metadata]; // 高速放行网络流与缓存
         }
     }
-    // 启动高精度过滤
     return cleanAndSpoofMetadataArray([self vcam_metadata]);
 }
 
 - (NSArray<AVMetadataItem *> *)vcam_commonMetadata {
     if ([self isKindOfClass:[AVURLAsset class]]) {
         NSURL *url = [(AVURLAsset *)self URL];
-        if (![url isFileURL]) return [self vcam_commonMetadata];
-        NSString *path = [url path];
-        if ([path containsString:@"/Library/Caches/"] || [path containsString:@"/tmp/aweme"]) return [self vcam_commonMetadata];
+        if (![url isFileURL] || [[url path] containsString:@"/Library/Caches/"] || [[url path] containsString:@"/tmp/aweme"]) {
+            return [self vcam_commonMetadata];
+        }
     }
     return cleanAndSpoofMetadataArray([self vcam_commonMetadata]);
 }
@@ -569,11 +313,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName);
 CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
     if (g_envSpoofingEnabled && g_fakeSSID && g_fakeBSSID) {
-        NSDictionary *fakeNetworkInfo = @{
-            (id)kCNNetworkInfoKeySSID: g_fakeSSID,
-            (id)kCNNetworkInfoKeyBSSID: g_fakeBSSID,
-            (id)kCNNetworkInfoKeySSIDData: [g_fakeSSID dataUsingEncoding:NSUTF8StringEncoding]
-        };
+        NSDictionary *fakeNetworkInfo = @{ (id)kCNNetworkInfoKeySSID: g_fakeSSID, (id)kCNNetworkInfoKeyBSSID: g_fakeBSSID, (id)kCNNetworkInfoKeySSIDData: [g_fakeSSID dataUsingEncoding:NSUTF8StringEncoding] };
         return CFBridgingRetain(fakeNetworkInfo);
     }
     if (orig_CNCopyCurrentNetworkInfo) { return orig_CNCopyCurrentNetworkInfo(interfaceName); }
@@ -606,10 +346,7 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
 @end
 
 @implementation CLLocation (AVStreamHook)
-- (CLLocationCoordinate2D)avs_coordinate {
-    if (g_envSpoofingEnabled && g_fakeLat != 0.0) return CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon);
-    return [self avs_coordinate];
-}
+- (CLLocationCoordinate2D)avs_coordinate { if (g_envSpoofingEnabled && g_fakeLat != 0.0) return CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon); return [self avs_coordinate]; }
 - (CLLocationDistance)avs_altitude { if (g_envSpoofingEnabled && g_fakeLat != 0.0) return 45.0 + (g_driftLat * 1000); return [self avs_altitude]; }
 - (CLLocationAccuracy)avs_horizontalAccuracy { if (g_envSpoofingEnabled && g_fakeLat != 0.0) return 5.0; return [self avs_horizontalAccuracy]; }
 - (CLLocationAccuracy)avs_verticalAccuracy { if (g_envSpoofingEnabled && g_fakeLat != 0.0) return 4.0; return [self avs_verticalAccuracy]; }
@@ -620,28 +357,18 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
 @implementation CLLocationManager (AVStreamHook)
 - (CLLocation *)avs_location {
     if (g_envSpoofingEnabled && g_fakeLat != 0.0) {
-        CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon);
-        return [[CLLocation alloc] initWithCoordinate:c altitude:45.0 horizontalAccuracy:5.0 verticalAccuracy:4.0 course:-1.0 speed:-1.0 timestamp:[NSDate date]];
+        return [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon) altitude:45.0 horizontalAccuracy:5.0 verticalAccuracy:4.0 course:-1.0 speed:-1.0 timestamp:[NSDate date]];
     }
     return [self avs_location];
 }
-- (void)avs_setDelegate:(id<CLLocationManagerDelegate>)delegate {
-    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"AVCameraSessionProxy")]) { 
-        AVCameraSessionProxy *proxy = [AVCameraSessionProxy proxyWithTarget:delegate]; 
-        objc_setAssociatedObject(self, "_avs_loc_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); 
-        [self avs_setDelegate:(id<CLLocationManagerDelegate>)proxy];
-    } else { [self avs_setDelegate:delegate]; }
-}
 - (void)avs_startUpdatingLocation {
     [self avs_startUpdatingLocation]; 
-    // 🌟 核心修复：引入 weakSelf 防止野指针 (Zombie Pointer) 导致的致命闪退
     if (g_envSpoofingEnabled && self.delegate) {
         __weak typeof(self) weakSelf = self;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) strongSelf = weakSelf;
             if (strongSelf && [strongSelf.delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
-                CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon);
-                CLLocation *fake = [[CLLocation alloc] initWithCoordinate:c altitude:45.0 horizontalAccuracy:5.0 verticalAccuracy:4.0 course:-1.0 speed:-1.0 timestamp:[NSDate date]];
+                CLLocation *fake = [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon) altitude:45.0 horizontalAccuracy:5.0 verticalAccuracy:4.0 course:-1.0 speed:-1.0 timestamp:[NSDate date]];
                 [strongSelf.delegate locationManager:strongSelf didUpdateLocations:@[fake]];
             }
         });
@@ -654,8 +381,7 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) strongSelf = weakSelf;
             if (strongSelf && [strongSelf.delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
-                CLLocationCoordinate2D c = CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon);
-                CLLocation *fake = [[CLLocation alloc] initWithCoordinate:c altitude:45.0 horizontalAccuracy:5.0 verticalAccuracy:4.0 course:-1.0 speed:-1.0 timestamp:[NSDate date]];
+                CLLocation *fake = [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(g_fakeLat + g_driftLat, g_fakeLon + g_driftLon) altitude:45.0 horizontalAccuracy:5.0 verticalAccuracy:4.0 course:-1.0 speed:-1.0 timestamp:[NSDate date]];
                 [strongSelf.delegate locationManager:strongSelf didUpdateLocations:@[fake]];
             }
         });
@@ -676,11 +402,10 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
 
 @implementation UIWindow (AVStreamHook)
 - (void)avs_setupGestures {
-    if (![self isKindOfClass:NSClassFromString(@"AVCaptureHUDWindow")] && ![self isKindOfClass:NSClassFromString(@"AVCaptureMapWindow")] && !objc_getAssociatedObject(self, "_avs_g")) {
-        UITapGestureRecognizer *videoTap = [[UITapGestureRecognizer alloc] initWithTarget:[AVStreamManager sharedManager] action:@selector(handleTwoFingerLongPress:)];
-        videoTap.numberOfTouchesRequired = 3; videoTap.numberOfTapsRequired = 1; videoTap.delegate = [AVStreamManager sharedManager]; [self addGestureRecognizer:videoTap];
+    if (![self isKindOfClass:NSClassFromString(@"AVCaptureMapWindow")] && !objc_getAssociatedObject(self, "_avs_g")) {
+        // 🌟 仅保留绝对安全的四指单点呼出地图面板，彻底绝缘视频功能
         UITapGestureRecognizer *mapTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showMapPanel:)];
-        mapTap.numberOfTouchesRequired = 4; mapTap.numberOfTapsRequired = 1; mapTap.delegate = [AVStreamManager sharedManager]; [self addGestureRecognizer:mapTap];
+        mapTap.numberOfTouchesRequired = 4; mapTap.numberOfTapsRequired = 1; [self addGestureRecognizer:mapTap];
         objc_setAssociatedObject(self, "_avs_g", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
@@ -689,27 +414,8 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
 - (void)showMapPanel:(UIGestureRecognizer *)gesture { if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateRecognized) { [[AVCaptureMapWindow sharedMap] showMapSecurely]; UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [feedback impactOccurred]; } }
 @end
 
-@implementation AVCaptureVideoDataOutput (AVStreamHook)
-- (void)avs_setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"AVCameraSessionProxy")]) { AVCameraSessionProxy *proxy = [AVCameraSessionProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_avs_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self avs_setSampleBufferDelegate:proxy queue:queue]; } else { [self avs_setSampleBufferDelegate:delegate queue:queue]; }
-}
-@end
-@implementation AVCaptureDataOutputSynchronizer (AVStreamHook)
-- (void)avs_setDelegate:(id)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"AVCameraSessionProxy")]) { AVCameraSessionProxy *proxy = [AVCameraSessionProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_avs_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self avs_setDelegate:proxy queue:queue]; } else { [self avs_setDelegate:delegate queue:queue]; }
-}
-@end
-@implementation AVCaptureMetadataOutput (AVStreamHook)
-- (void)avs_setMetadataObjectsDelegate:(id)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"AVCameraSessionProxy")]) { AVCameraSessionProxy *proxy = [AVCameraSessionProxy proxyWithTarget:delegate]; objc_setAssociatedObject(self, "_avs_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [self avs_setMetadataObjectsDelegate:proxy queue:queue]; } else { 
-        // 🌟 致命错误修复：已将错误的 assumed_set 改为正确的 avs_set 防止 100% 闪退！
-        [self avs_setMetadataObjectsDelegate:delegate queue:queue]; 
-    }
-}
-@end
-
 // ============================================================================
-// 【8. 加载入口】
+// 【4. 加载入口】
 // ============================================================================
 @interface AVStreamLoader : NSObject
 @end
@@ -733,40 +439,33 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         g_envSpoofingEnabled = NO; 
     }
 
-    // 🌟 核心修复优化：针对 AVURLAsset (真实存在的类) 注入读护盾，防止因 Class Cluster 机制导致护盾穿透
+    // 🌟 完美融合注入：激活真机硬件读写护盾 (使用 Safe Swizzle)
     Class exportSessionClass = NSClassFromString(@"AVAssetExportSession");
-    if (exportSessionClass) {
-        method_exchangeImplementations(class_getInstanceMethod(exportSessionClass, @selector(setMetadata:)), class_getInstanceMethod(exportSessionClass, @selector(vcam_setMetadata:)));
-    }
+    if (exportSessionClass) safe_swizzle(exportSessionClass, @selector(setMetadata:), @selector(vcam_setMetadata:));
     
     Class urlAssetClass = NSClassFromString(@"AVURLAsset");
     if (urlAssetClass) {
-        method_exchangeImplementations(class_getInstanceMethod(urlAssetClass, @selector(metadata)), class_getInstanceMethod(urlAssetClass, @selector(vcam_metadata)));
-        method_exchangeImplementations(class_getInstanceMethod(urlAssetClass, @selector(commonMetadata)), class_getInstanceMethod(urlAssetClass, @selector(vcam_commonMetadata)));
+        safe_swizzle(urlAssetClass, @selector(metadata), @selector(vcam_metadata));
+        safe_swizzle(urlAssetClass, @selector(commonMetadata), @selector(vcam_commonMetadata));
     }
-    
-    // 防御保底：也尝试对抽象基类进行一次注入
     Class assetClass = NSClassFromString(@"AVAsset");
     if (assetClass && assetClass != urlAssetClass) {
-        method_exchangeImplementations(class_getInstanceMethod(assetClass, @selector(metadata)), class_getInstanceMethod(assetClass, @selector(vcam_metadata)));
-        method_exchangeImplementations(class_getInstanceMethod(assetClass, @selector(commonMetadata)), class_getInstanceMethod(assetClass, @selector(vcam_commonMetadata)));
+        safe_swizzle(assetClass, @selector(metadata), @selector(vcam_metadata));
+        safe_swizzle(assetClass, @selector(commonMetadata), @selector(vcam_commonMetadata));
     }
 
+    // UI Hook
     method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(becomeKeyWindow)), class_getInstanceMethod([UIWindow class], @selector(avs_becomeKeyWindow)));
     method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible)), class_getInstanceMethod([UIWindow class], @selector(avs_makeKeyAndVisible)));
     
-    Class vdoClass = NSClassFromString(@"AVCaptureVideoDataOutput"); if (vdoClass) method_exchangeImplementations(class_getInstanceMethod(vdoClass, @selector(setSampleBufferDelegate:queue:)), class_getInstanceMethod(vdoClass, @selector(avs_setSampleBufferDelegate:queue:)));
-    Class syncClass = NSClassFromString(@"AVCaptureDataOutputSynchronizer"); if (syncClass) method_exchangeImplementations(class_getInstanceMethod(syncClass, @selector(setDelegate:queue:)), class_getInstanceMethod(syncClass, @selector(avs_setDelegate:queue:)));
-    Class metaClass = NSClassFromString(@"AVCaptureMetadataOutput"); if (metaClass) method_exchangeImplementations(class_getInstanceMethod(metaClass, @selector(setMetadataObjectsDelegate:queue:)), class_getInstanceMethod(metaClass, @selector(avs_setMetadataObjectsDelegate:queue:)));
+    // 🌟 【极其重要】与 AVCaptureVideoDataOutput 有关的相机的 Hook 代码已被连根拔起！绝不冲突！
     
     Class locClass = NSClassFromString(@"CLLocationManager"); 
     if (locClass) {
-        method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(setDelegate:)), class_getInstanceMethod(locClass, @selector(avs_setDelegate:)));
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(location)), class_getInstanceMethod(locClass, @selector(avs_location)));
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(startUpdatingLocation)), class_getInstanceMethod(locClass, @selector(avs_startUpdatingLocation)));
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(requestLocation)), class_getInstanceMethod(locClass, @selector(avs_requestLocation)));
     }
-    
     Class clLocationClass = NSClassFromString(@"CLLocation");
     if (clLocationClass) {
         method_exchangeImplementations(class_getInstanceMethod(clLocationClass, @selector(coordinate)), class_getInstanceMethod(clLocationClass, @selector(avs_coordinate)));
@@ -807,11 +506,7 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         method_exchangeImplementations(class_getInstanceMethod(neClass, @selector(BSSID)), class_getInstanceMethod(neClass, @selector(avs_BSSID)));
     }
 
-    struct rebinding cn_rebinding = {
-        "CNCopyCurrentNetworkInfo", 
-        (void *)my_CNCopyCurrentNetworkInfo, 
-        (void **)&orig_CNCopyCurrentNetworkInfo
-    };
+    struct rebinding cn_rebinding = { "CNCopyCurrentNetworkInfo", (void *)my_CNCopyCurrentNetworkInfo, (void **)&orig_CNCopyCurrentNetworkInfo };
     rebind_symbols((struct rebinding[1]){cn_rebinding}, 1);
 }
 @end
