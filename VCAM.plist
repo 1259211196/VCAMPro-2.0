@@ -1,9 +1,7 @@
 {
     Filter = {
         Bundles = (
-            "com.ss.iphone.ugc.Aweme",       // 抖音/TikTok 通用包名
-            "com.zhiliaoapp.musically",      // TikTok 旧版/部分地区包名
-            "com.ss.iphone.ugc.AwemeI18n"    // TikTok 国际版变体
+            "com.apple.UIKit"
         );
     };
 }
