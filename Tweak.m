@@ -32,7 +32,7 @@ extern "C" {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations" 
 
 // ============================================================================
-// 【0. 工业级安全交换算法 (防止 AVAsset 类簇穿透)】
+// 【0. 工业级安全交换算法 (防止类簇穿透)】
 // ============================================================================
 static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) {
     if (!cls) return;
@@ -93,8 +93,9 @@ static NSString *getLiveTimestamp() {
     return [NSString stringWithUTF8String:buffer];
 }
 
-// 脏数据特征库
+// 🌟 护盾特征库 (包含外部摄像头拦截标识)
 #define IS_DIRTY_TAG(str) (str && ([[str uppercaseString] containsString:@"AWEME"] || [[str uppercaseString] containsString:@"FFMPEG"] || [[str uppercaseString] containsString:@"VCAM"]))
+#define IS_FAKE_CAM(s) (s && ([[s uppercaseString] containsString:@"VCAM"] || [[s uppercaseString] containsString:@"E2ESOFT"] || [[s uppercaseString] containsString:@"EXTERNAL"]))
 
 // 内部核心清洗逻辑 (Block 封装复用)
 static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
@@ -245,7 +246,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 - (NSString *)avs_SSID; - (NSString *)avs_BSSID;
 @end
 
-// 🌟 护盾声明
+// 🌟 元数据护盾声明
 @interface AVAssetExportSession (AVStreamHook)
 - (void)vcam_setMetadata:(NSArray<AVMetadataItem *> *)metadata;
 @end
@@ -254,9 +255,41 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 - (NSArray<AVMetadataItem *> *)vcam_commonMetadata;
 @end
 
+// 🌟 相机隐身术护盾声明
+@interface AVCaptureDevice (AVStreamHook)
+- (AVCaptureDeviceType)avs_deviceType;
+- (NSString *)avs_modelID;
+- (NSString *)avs_localizedName;
+- (NSString *)avs_manufacturer;
+@end
+
 // ============================================================================
-// 【3. 系统底层 Hook 实现 (真机护盾 + 网络位置劫持)】
+// 【3. 系统底层 Hook 实现 (相机隐身术 + 真机护盾 + 网络位置劫持)】
 // ============================================================================
+
+// 🌟 完美融合实现：【VCAM 镜头隐身术】
+@implementation AVCaptureDevice (AVStreamHook)
+- (AVCaptureDeviceType)avs_deviceType {
+    AVCaptureDeviceType type = [self avs_deviceType];
+    if (IS_FAKE_CAM(type)) return AVCaptureDeviceTypeBuiltInWideAngleCamera;
+    return type;
+}
+- (NSString *)avs_modelID {
+    NSString *orig = [self avs_modelID];
+    if (IS_FAKE_CAM(orig)) return @"com.apple.avfoundation.avcapturedevice.built-in_video:0";
+    return orig;
+}
+- (NSString *)avs_localizedName {
+    NSString *orig = [self avs_localizedName];
+    if (IS_FAKE_CAM(orig)) return @"Back Camera";
+    return orig;
+}
+- (NSString *)avs_manufacturer {
+    NSString *orig = [self avs_manufacturer];
+    if (IS_FAKE_CAM(orig)) return @"Apple Inc.";
+    return orig;
+}
+@end
 
 // 🌟 【写护盾】强制覆盖写入真实硬件信息 
 @implementation AVAssetExportSession (AVStreamHook)
@@ -278,7 +311,6 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeySoftware, myVer);
     addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeyCreationDate, myDate);
     
-    // 补回物理位置对齐
     if (g_envSpoofingEnabled && g_fakeLat != 0.0) {
         addMeta(AVMetadataKeySpaceCommon, AVMetadataCommonKeyLocation, [NSString stringWithFormat:@"%+08.4f%+09.4f/", g_fakeLat, g_fakeLon]);
     }
@@ -403,7 +435,6 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
 @implementation UIWindow (AVStreamHook)
 - (void)avs_setupGestures {
     if (![self isKindOfClass:NSClassFromString(@"AVCaptureMapWindow")] && !objc_getAssociatedObject(self, "_avs_g")) {
-        // 🌟 仅保留绝对安全的四指单点呼出地图面板，彻底绝缘视频功能
         UITapGestureRecognizer *mapTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showMapPanel:)];
         mapTap.numberOfTouchesRequired = 4; mapTap.numberOfTapsRequired = 1; [self addGestureRecognizer:mapTap];
         objc_setAssociatedObject(self, "_avs_g", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -415,7 +446,7 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
 @end
 
 // ============================================================================
-// 【4. 加载入口】
+// 【4. 加载入口 (统一中枢神经)】
 // ============================================================================
 @interface AVStreamLoader : NSObject
 @end
@@ -439,7 +470,16 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         g_envSpoofingEnabled = NO; 
     }
 
-    // 🌟 完美融合注入：激活真机硬件读写护盾 (使用 Safe Swizzle)
+    // 🌟 【护盾挂载 1】：激活 VCAM 镜头隐身术，掩护外部相机插件！
+    Class captureDeviceClass = NSClassFromString(@"AVCaptureDevice");
+    if (captureDeviceClass) {
+        safe_swizzle(captureDeviceClass, @selector(deviceType), @selector(avs_deviceType));
+        safe_swizzle(captureDeviceClass, @selector(modelID), @selector(avs_modelID));
+        safe_swizzle(captureDeviceClass, @selector(localizedName), @selector(avs_localizedName));
+        safe_swizzle(captureDeviceClass, @selector(manufacturer), @selector(avs_manufacturer));
+    }
+
+    // 🌟 【护盾挂载 2】：激活真机硬件读写护盾 (使用 Safe Swizzle 彻底免疫类簇穿透)
     Class exportSessionClass = NSClassFromString(@"AVAssetExportSession");
     if (exportSessionClass) safe_swizzle(exportSessionClass, @selector(setMetadata:), @selector(vcam_setMetadata:));
     
@@ -454,12 +494,11 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         safe_swizzle(assetClass, @selector(commonMetadata), @selector(vcam_commonMetadata));
     }
 
-    // UI Hook
+    // UI Hook (仅包含环境面板手势)
     method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(becomeKeyWindow)), class_getInstanceMethod([UIWindow class], @selector(avs_becomeKeyWindow)));
     method_exchangeImplementations(class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible)), class_getInstanceMethod([UIWindow class], @selector(avs_makeKeyAndVisible)));
     
-    // 🌟 【极其重要】与 AVCaptureVideoDataOutput 有关的相机的 Hook 代码已被连根拔起！绝不冲突！
-    
+    // GPS 定位拦截
     Class locClass = NSClassFromString(@"CLLocationManager"); 
     if (locClass) {
         method_exchangeImplementations(class_getInstanceMethod(locClass, @selector(location)), class_getInstanceMethod(locClass, @selector(avs_location)));
@@ -476,6 +515,7 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         method_exchangeImplementations(class_getInstanceMethod(clLocationClass, @selector(course)), class_getInstanceMethod(clLocationClass, @selector(avs_course)));
     }
 
+    // 运营商基站拦截
     Class carrierClass = NSClassFromString(@"CTCarrier");
     if (carrierClass) {
         method_exchangeImplementations(class_getInstanceMethod(carrierClass, @selector(carrierName)), class_getInstanceMethod(carrierClass, @selector(avs_carrierName)));
@@ -486,6 +526,7 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
     Class netInfoClass = NSClassFromString(@"CTTelephonyNetworkInfo");
     if (netInfoClass) method_exchangeImplementations(class_getInstanceMethod(netInfoClass, @selector(serviceSubscriberCellularProviders)), class_getInstanceMethod(netInfoClass, @selector(avs_serviceSubscriberCellularProviders)));
     
+    // 时区与语言环境拦截
     Class tzClass = NSClassFromString(@"NSTimeZone");
     if (tzClass) {
         method_exchangeImplementations(class_getClassMethod(tzClass, @selector(systemTimeZone)), class_getClassMethod(tzClass, @selector(avs_systemTimeZone)));
@@ -499,6 +540,7 @@ CFDictionaryRef my_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
         method_exchangeImplementations(class_getClassMethod(loclClass, @selector(preferredLanguages)), class_getClassMethod(loclClass, @selector(avs_preferredLanguages)));
     }
 
+    // Wi-Fi Mac地址拦截
     Class neClass = NSClassFromString(@"NEHotspotNetwork");
     if (neClass) {
         method_exchangeImplementations(class_getClassMethod(neClass, @selector(fetchCurrentWithCompletionHandler:)), class_getClassMethod(neClass, @selector(avs_fetchCurrentWithCompletionHandler:)));
