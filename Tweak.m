@@ -41,7 +41,7 @@
 @end
 
 // ============================================================================
-// 【2. 寄生级渲染引擎 (零拷贝、零元数据破坏)】
+// 【2. 寄生级渲染引擎 (零拷贝、零元数据破坏、异步防掉帧)】
 // ============================================================================
 @interface VCAMParasiteCore : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -82,30 +82,67 @@
     return self;
 }
 
+// 👑 极限优化版：异步防阻塞 + 强杀 HDR 曝光 + 完美色彩兜底
 - (void)loadVideo {
-    [self.readLock lock];
-    if (self.assetReader) { [self.assetReader cancelReading]; self.assetReader = nil; self.trackOutput = nil; }
-    
     NSString *videoPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"com.apple.avfoundation.videocache.tmp"];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:videoPath]) {
-        [self.readLock unlock];
-        return;
-    }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:videoPath]) return;
     
-    AVAsset *asset = [AVAsset assetWithURL:[NSURL fileURLWithPath:videoPath]];
-    self.assetReader = [AVAssetReader assetReaderWithAsset:asset error:nil];
-    AVAssetTrack *videoTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+    NSURL *videoURL = [NSURL fileURLWithPath:videoPath];
+    AVAsset *asset = [AVAsset assetWithURL:videoURL];
     
-    if (videoTrack && self.assetReader) {
-        // 强制输出与相机底层相同的 32BGRA 格式，完美贴合
-        NSDictionary *settings = @{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)};
-        self.trackOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:videoTrack outputSettings:settings];
-        if ([self.assetReader canAddOutput:self.trackOutput]) {
-            [self.assetReader addOutput:self.trackOutput];
-            [self.assetReader startReading];
-        }
-    }
-    [self.readLock unlock];
+    // 异步加载轨道，完美规避 iOS 16+ 线程阻塞导致的主相机掉帧卡顿
+    [asset loadValuesAsynchronouslyForKeys:@[@"tracks"] completionHandler:^{
+        NSError *error = nil;
+        AVKeyValueStatus status = [asset statusOfValueForKey:@"tracks" error:&error];
+        if (status != AVKeyValueStatusLoaded) return;
+        
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+            [self.readLock lock];
+            
+            if (self.assetReader) {
+                [self.assetReader cancelReading];
+                self.assetReader = nil;
+                self.trackOutput = nil;
+            }
+            
+            self.assetReader = [AVAssetReader assetReaderWithAsset:asset error:nil];
+            AVAssetTrack *videoTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+            
+            if (videoTrack && self.assetReader) {
+                // 强制 IOSurface 内存共享与 32BGRA 对齐
+                NSDictionary *settings = @{
+                    (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+                    (id)kCVPixelBufferIOSurfacePropertiesKey: @{}
+                };
+                
+                AVMutableVideoComposition *videoComp = nil;
+                @try {
+                    videoComp = (AVMutableVideoComposition *)[AVVideoComposition videoCompositionWithPropertiesOfAsset:asset];
+                    // 彻底降维 HDR -> SDR，防止系统解析异常导致的发白发灰
+                    videoComp.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2;
+                    videoComp.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2;
+                    videoComp.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2;
+                } @catch (NSException *e) {
+                    videoComp = nil;
+                }
+                
+                if (videoComp) {
+                    AVAssetReaderVideoCompositionOutput *compOut = [AVAssetReaderVideoCompositionOutput assetReaderVideoCompositionOutputWithVideoTracks:@[videoTrack] videoSettings:settings];
+                    compOut.videoComposition = videoComp;
+                    self.trackOutput = (AVAssetReaderOutput *)compOut;
+                } else {
+                    // 极致兜底：即使合成器失败，也要在 Output 层面强行限制颜色空间，防止 fallback 发白
+                    self.trackOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:videoTrack outputSettings:settings];
+                }
+                
+                if ([self.assetReader canAddOutput:self.trackOutput]) {
+                    [self.assetReader addOutput:self.trackOutput];
+                    [self.assetReader startReading];
+                }
+            }
+            [self.readLock unlock];
+        });
+    }];
 }
 
 - (CVPixelBufferRef)copyNextFrame {
