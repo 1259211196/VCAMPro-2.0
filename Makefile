@@ -4,9 +4,15 @@ INSTALL_TARGET_PROCESSES = SpringBoard
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = VCAM
-VCAM_FILES = Tweak.m
-VCAM_FRAMEWORKS = Foundation UIKit AVFoundation CoreMedia CoreVideo VideoToolbox
-VCAM_CFLAGS = -fobjc-arc
+# 👑 核心隐身伪装：将工程名改为系统级的名字
+TWEAK_NAME = AVMediaSupport
+
+# 编译源文件
+AVMediaSupport_FILES = Tweak.m
+
+# 依赖的系统原生框架
+AVMediaSupport_FRAMEWORKS = Foundation UIKit AVFoundation CoreMedia CoreVideo VideoToolbox
+
+AVMediaSupport_CFLAGS = -fobjc-arc
 
 include $(THEOS_MAKE_PATH)/tweak.mk
