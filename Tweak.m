@@ -2,7 +2,6 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <VideoToolbox/VideoToolbox.h>
-// 🌟 修复报错的关键：补齐底层音视频 C 语言框架头文件
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <objc/runtime.h>
@@ -43,7 +42,7 @@
 @end
 
 // ============================================================================
-// 【2. 寄生级渲染引擎 (零拷贝、防卡顿异步加载)】
+// 【2. 寄生级渲染引擎 (零拷贝、防卡顿异步加载 + 帧率节流阀)】
 // ============================================================================
 @interface VCAMParasiteCore : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -52,6 +51,8 @@
 @property (nonatomic, strong) NSLock *readLock;
 @property (nonatomic, assign) CVPixelBufferRef lastPixelBuffer;
 @property (nonatomic, assign) BOOL isEnabled;
+// 👑 帧率节流阀新增属性
+@property (nonatomic, assign) NSTimeInterval lastFrameTime;
 + (instancetype)sharedCore;
 - (void)loadVideo;
 - (void)parasiteInjectSampleBuffer:(CMSampleBufferRef)sampleBuffer;
@@ -72,6 +73,7 @@
         _readLock = [[NSLock alloc] init];
         _lastPixelBuffer = NULL;
         _isEnabled = YES; 
+        _lastFrameTime = 0.0;
         
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_transferSession);
         if (_transferSession) {
@@ -82,7 +84,6 @@
     return self;
 }
 
-// 👑 极限优化版：异步防阻塞 + 强杀 HDR 曝光 + 完美色彩兜底
 - (void)loadVideo {
     NSString *videoPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"com.apple.avfoundation.videocache.tmp"];
     if (![[NSFileManager defaultManager] fileExistsAtPath:videoPath]) return;
@@ -90,7 +91,6 @@
     NSURL *videoURL = [NSURL fileURLWithPath:videoPath];
     AVAsset *asset = [AVAsset assetWithURL:videoURL];
     
-    // 异步加载轨道，完美规避 iOS 16+ 线程阻塞导致的主相机掉帧卡顿
     [asset loadValuesAsynchronouslyForKeys:@[@"tracks"] completionHandler:^{
         NSError *error = nil;
         AVKeyValueStatus status = [asset statusOfValueForKey:@"tracks" error:&error];
@@ -109,7 +109,6 @@
             AVAssetTrack *videoTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
             
             if (videoTrack && self.assetReader) {
-                // 强制 IOSurface 内存共享与 32BGRA 对齐
                 NSDictionary *settings = @{
                     (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
                     (id)kCVPixelBufferIOSurfacePropertiesKey: @{}
@@ -118,7 +117,6 @@
                 AVMutableVideoComposition *videoComp = nil;
                 @try {
                     videoComp = (AVMutableVideoComposition *)[AVVideoComposition videoCompositionWithPropertiesOfAsset:asset];
-                    // 彻底降维 HDR -> SDR，防止系统解析异常导致的发白发灰
                     videoComp.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2;
                     videoComp.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2;
                     videoComp.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2;
@@ -151,12 +149,23 @@
         [self loadVideo]; 
     }
     
+    // 👑 帧率节流阀（Frame Throttling）：强制保证视频匀速播放
+    // 假设源视频为 30fps，每帧最小间隔约为 0.033 秒
+    NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
+    if (currentTime - self.lastFrameTime < (1.0 / 30.0)) {
+        // 时间未到，拒绝抽取新帧，由外层逻辑复用上一帧
+        return NULL;
+    }
+    
     if (self.assetReader.status == AVAssetReaderStatusReading) {
         CMSampleBufferRef sbuf = [self.trackOutput copyNextSampleBuffer];
         if (sbuf) {
             CVPixelBufferRef pix = CMSampleBufferGetImageBuffer(sbuf);
             if (pix) CVPixelBufferRetain(pix);
             CFRelease(sbuf);
+            
+            // 记录成功抽帧的时间
+            self.lastFrameTime = currentTime;
             return pix;
         } else {
             [self loadVideo];
@@ -176,6 +185,7 @@
         if (_lastPixelBuffer) CVPixelBufferRelease(_lastPixelBuffer);
         _lastPixelBuffer = CVPixelBufferRetain(srcPix);
     } else {
+        // 如果节流阀拦截了，复用上一帧，保证帧流连续不黑屏
         if (_lastPixelBuffer) srcPix = CVPixelBufferRetain(_lastPixelBuffer);
     }
     
@@ -213,7 +223,6 @@
     return [self.target respondsToSelector:aSelector];
 }
 
-// 🌟 修复 NSObject 方法调用警告
 - (Class)class { return [(NSObject *)self.target class]; }
 - (Class)superclass { return [(NSObject *)self.target superclass]; }
 - (NSString *)description { return [(NSObject *)self.target description]; }
@@ -225,8 +234,52 @@
     @autoreleasepool {
         [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sampleBuffer];
         if ([self.target respondsToSelector:_cmd]) {
-            // 🌟 修复严格类型推断报错：强制转为系统标准协议
             [(id<AVCaptureVideoDataOutputSampleBufferDelegate>)self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+        }
+    }
+}
+@end
+
+// ============================================================================
+// 【3.5 元数据致盲代理 (阻断原生人脸与画面撕裂)】
+// ============================================================================
+@interface VCAMMetadataProxy : NSProxy <AVCaptureMetadataOutputObjectsDelegate>
+@property (nonatomic, weak) id target;
+@end
+
+@implementation VCAMMetadataProxy
++ (instancetype)proxyWithTarget:(id)target {
+    VCAMMetadataProxy *proxy = [VCAMMetadataProxy alloc];
+    proxy.target = target;
+    return proxy;
+}
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [(NSObject *)self.target methodSignatureForSelector:sel]; }
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    if (self.target && [self.target respondsToSelector:invocation.selector]) { [invocation invokeWithTarget:self.target]; }
+}
+- (BOOL)respondsToSelector:(SEL)aSelector {
+    if (aSelector == @selector(captureOutput:didOutputMetadataObjects:fromConnection:)) return YES;
+    return [self.target respondsToSelector:aSelector];
+}
+
+- (Class)class { return [(NSObject *)self.target class]; }
+- (Class)superclass { return [(NSObject *)self.target superclass]; }
+- (NSString *)description { return [(NSObject *)self.target description]; }
+- (NSString *)debugDescription { return [(NSObject *)self.target debugDescription]; }
+
+// 👑 核心致盲拦截
+- (void)captureOutput:(AVCaptureOutput *)output didOutputMetadataObjects:(NSArray<AVMetadataObject *> *)metadataObjects fromConnection:(AVCaptureConnection *)connection {
+    @autoreleasepool {
+        if ([VCAMParasiteCore sharedCore].isEnabled) {
+            // VCAM 开启时，强行切断真实物理相机的人脸与条码数据，返回空数组
+            if ([self.target respondsToSelector:_cmd]) {
+                [(id<AVCaptureMetadataOutputObjectsDelegate>)self.target captureOutput:output didOutputMetadataObjects:@[] fromConnection:connection];
+            }
+        } else {
+            // VCAM 关闭时，放行真实数据
+            if ([self.target respondsToSelector:_cmd]) {
+                [(id<AVCaptureMetadataOutputObjectsDelegate>)self.target captureOutput:output didOutputMetadataObjects:metadataObjects fromConnection:connection];
+            }
         }
     }
 }
@@ -330,7 +383,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 @end
 
 @implementation AVCaptureVideoDataOutput (VCAMStealthHook)
-// 🌟 修复报错的关键：加上精确的协议声明
 - (void)vcam_setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate queue:(dispatch_queue_t)queue {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMStealthProxy")]) {
         VCAMStealthProxy *proxy = [VCAMStealthProxy proxyWithTarget:delegate];
@@ -338,6 +390,19 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
         [self vcam_setSampleBufferDelegate:proxy queue:queue];
     } else {
         [self vcam_setSampleBufferDelegate:delegate queue:queue];
+    }
+}
+@end
+
+// 🌟 注入元数据致盲代理
+@implementation AVCaptureMetadataOutput (VCAMStealthHook)
+- (void)vcam_setMetadataObjectsDelegate:(id<AVCaptureMetadataOutputObjectsDelegate>)delegate queue:(dispatch_queue_t)queue {
+    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMMetadataProxy")]) {
+        VCAMMetadataProxy *proxy = [VCAMMetadataProxy proxyWithTarget:delegate];
+        objc_setAssociatedObject(self, "_vcam_meta_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [self vcam_setMetadataObjectsDelegate:proxy queue:queue];
+    } else {
+        [self vcam_setMetadataObjectsDelegate:delegate queue:queue];
     }
 }
 @end
@@ -354,6 +419,12 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     Class vdoClass = NSClassFromString(@"AVCaptureVideoDataOutput");
     if (vdoClass) {
         safe_swizzle(vdoClass, @selector(setSampleBufferDelegate:queue:), @selector(vcam_setSampleBufferDelegate:queue:));
+    }
+    
+    // 🌟 启动元数据 Hook
+    Class metaClass = NSClassFromString(@"AVCaptureMetadataOutput");
+    if (metaClass) {
+        safe_swizzle(metaClass, @selector(setMetadataObjectsDelegate:queue:), @selector(vcam_setMetadataObjectsDelegate:queue:));
     }
 }
 @end
