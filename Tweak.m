@@ -12,7 +12,7 @@
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 // ============================================================================
-// 【1. 无痕转码引擎 (伪装成系统缓存文件)】
+// 【1. 无痕转码引擎】
 // ============================================================================
 @interface VCAMStealthPreprocessor : NSObject
 + (void)processVideoAtURL:(NSURL *)sourceURL completion:(void(^)(BOOL success))completion;
@@ -42,7 +42,7 @@
 @end
 
 // ============================================================================
-// 【2. 寄生级渲染引擎 (零拷贝、防卡顿异步加载 + 帧率节流阀)】
+// 【2. 寄生级渲染引擎 (微信 NV12 破锁 + 帧率节流)】
 // ============================================================================
 @interface VCAMParasiteCore : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -51,8 +51,7 @@
 @property (nonatomic, strong) NSLock *readLock;
 @property (nonatomic, assign) CVPixelBufferRef lastPixelBuffer;
 @property (nonatomic, assign) BOOL isEnabled;
-// 👑 帧率节流阀新增属性
-@property (nonatomic, assign) NSTimeInterval lastFrameTime;
+@property (nonatomic, assign) NSTimeInterval lastFrameTime; // 帧率节流阀
 + (instancetype)sharedCore;
 - (void)loadVideo;
 - (void)parasiteInjectSampleBuffer:(CMSampleBufferRef)sampleBuffer;
@@ -149,11 +148,9 @@
         [self loadVideo]; 
     }
     
-    // 👑 帧率节流阀（Frame Throttling）：强制保证视频匀速播放
-    // 假设源视频为 30fps，每帧最小间隔约为 0.033 秒
+    // 👑 帧率节流阀（保证微信视频匀速播放，不快进）
     NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
     if (currentTime - self.lastFrameTime < (1.0 / 30.0)) {
-        // 时间未到，拒绝抽取新帧，由外层逻辑复用上一帧
         return NULL;
     }
     
@@ -163,8 +160,6 @@
             CVPixelBufferRef pix = CMSampleBufferGetImageBuffer(sbuf);
             if (pix) CVPixelBufferRetain(pix);
             CFRelease(sbuf);
-            
-            // 记录成功抽帧的时间
             self.lastFrameTime = currentTime;
             return pix;
         } else {
@@ -174,6 +169,7 @@
     return NULL;
 }
 
+// 👑 微信/全局兼容注入补丁
 - (void)parasiteInjectSampleBuffer:(CMSampleBufferRef)sampleBuffer {
     if (!self.isEnabled) return;
     
@@ -185,14 +181,19 @@
         if (_lastPixelBuffer) CVPixelBufferRelease(_lastPixelBuffer);
         _lastPixelBuffer = CVPixelBufferRetain(srcPix);
     } else {
-        // 如果节流阀拦截了，复用上一帧，保证帧流连续不黑屏
         if (_lastPixelBuffer) srcPix = CVPixelBufferRetain(_lastPixelBuffer);
     }
     
     if (srcPix) {
         CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (dstPix && self.transferSession) {
-            VTPixelTransferSessionTransferImage(self.transferSession, srcPix, dstPix);
+            
+            // 👑 核心：强行获取微信 NV12 内存锁，防止黑屏或失效
+            CVReturn lockStatus = CVPixelBufferLockBaseAddress(dstPix, 0);
+            if (lockStatus == kCVReturnSuccess) {
+                VTPixelTransferSessionTransferImage(self.transferSession, srcPix, dstPix);
+                CVPixelBufferUnlockBaseAddress(dstPix, 0);
+            }
         }
         CVPixelBufferRelease(srcPix);
     }
@@ -200,7 +201,7 @@
 @end
 
 // ============================================================================
-// 【3. 极度伪装代理 (防止内存探针扫描)】
+// 【3. 极度伪装代理】
 // ============================================================================
 @interface VCAMStealthProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate>
 @property (nonatomic, weak) id target;
@@ -214,9 +215,7 @@
 }
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [(NSObject *)self.target methodSignatureForSelector:sel]; }
 - (void)forwardInvocation:(NSInvocation *)invocation {
-    if (self.target && [self.target respondsToSelector:invocation.selector]) {
-        [invocation invokeWithTarget:self.target];
-    }
+    if (self.target && [self.target respondsToSelector:invocation.selector]) { [invocation invokeWithTarget:self.target]; }
 }
 - (BOOL)respondsToSelector:(SEL)aSelector {
     if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:)) return YES;
@@ -233,48 +232,15 @@
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
     @autoreleasepool {
         [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sampleBuffer];
-        - (void)parasiteInjectSampleBuffer:(CMSampleBufferRef)sampleBuffer {
-    if (!self.isEnabled) return;
-    
-    [self.readLock lock];
-    CVPixelBufferRef srcPix = [self copyNextFrame];
-    [self.readLock unlock];
-    
-    if (srcPix) {
-        if (_lastPixelBuffer) CVPixelBufferRelease(_lastPixelBuffer);
-        _lastPixelBuffer = CVPixelBufferRetain(srcPix);
-    } else {
-        if (_lastPixelBuffer) srcPix = CVPixelBufferRetain(_lastPixelBuffer);
-    }
-    
-    if (srcPix) {
-        CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
-        if (dstPix && self.transferSession) {
-            
-            // 👑 微信级加固补丁：强行获取系统内存锁！
-            // 微信会锁定这块内存防止第三方篡改，我们必须在底层声明“我们要写入这块物理内存”
-            CVReturn lockStatus = CVPixelBufferLockBaseAddress(dstPix, 0);
-            
-            if (lockStatus == kCVReturnSuccess) {
-                // 强制 GPU 执行格式转换与寄生覆写
-                OSStatus status = VTPixelTransferSessionTransferImage(self.transferSession, srcPix, dstPix);
-                
-                // 覆写完毕，释放内存锁，还给微信
-                CVPixelBufferUnlockBaseAddress(dstPix, 0);
-                
-                #if DEBUG
-                if (status != noErr) {
-                    NSLog(@"[VCAM 警告] 微信底层覆写失败，错误码: %d", (int)status);
-                }
-                #endif
-            }
+        if ([self.target respondsToSelector:_cmd]) {
+            [(id<AVCaptureVideoDataOutputSampleBufferDelegate>)self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
         }
-        CVPixelBufferRelease(srcPix);
     }
 }
+@end
 
 // ============================================================================
-// 【3.5 元数据致盲代理 (阻断原生人脸与画面撕裂)】
+// 【3.5 元数据致盲代理 (阻断人脸检测穿帮)】
 // ============================================================================
 @interface VCAMMetadataProxy : NSProxy <AVCaptureMetadataOutputObjectsDelegate>
 @property (nonatomic, weak) id target;
@@ -300,16 +266,13 @@
 - (NSString *)description { return [(NSObject *)self.target description]; }
 - (NSString *)debugDescription { return [(NSObject *)self.target debugDescription]; }
 
-// 👑 核心致盲拦截
 - (void)captureOutput:(AVCaptureOutput *)output didOutputMetadataObjects:(NSArray<AVMetadataObject *> *)metadataObjects fromConnection:(AVCaptureConnection *)connection {
     @autoreleasepool {
         if ([VCAMParasiteCore sharedCore].isEnabled) {
-            // VCAM 开启时，强行切断真实物理相机的人脸与条码数据，返回空数组
             if ([self.target respondsToSelector:_cmd]) {
                 [(id<AVCaptureMetadataOutputObjectsDelegate>)self.target captureOutput:output didOutputMetadataObjects:@[] fromConnection:connection];
             }
         } else {
-            // VCAM 关闭时，放行真实数据
             if ([self.target respondsToSelector:_cmd]) {
                 [(id<AVCaptureMetadataOutputObjectsDelegate>)self.target captureOutput:output didOutputMetadataObjects:metadataObjects fromConnection:connection];
             }
@@ -319,7 +282,7 @@
 @end
 
 // ============================================================================
-// 【4. 隐身控制台 (无痕操作)】
+// 【4. 隐身控制台】
 // ============================================================================
 @interface VCAMStealthUIManager : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 + (instancetype)sharedManager;
@@ -427,7 +390,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 }
 @end
 
-// 🌟 注入元数据致盲代理
 @implementation AVCaptureMetadataOutput (VCAMStealthHook)
 - (void)vcam_setMetadataObjectsDelegate:(id<AVCaptureMetadataOutputObjectsDelegate>)delegate queue:(dispatch_queue_t)queue {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMMetadataProxy")]) {
@@ -454,7 +416,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
         safe_swizzle(vdoClass, @selector(setSampleBufferDelegate:queue:), @selector(vcam_setSampleBufferDelegate:queue:));
     }
     
-    // 🌟 启动元数据 Hook
     Class metaClass = NSClassFromString(@"AVCaptureMetadataOutput");
     if (metaClass) {
         safe_swizzle(metaClass, @selector(setMetadataObjectsDelegate:queue:), @selector(vcam_setMetadataObjectsDelegate:queue:));
