@@ -1,29 +1,25 @@
-# 1. 编译架构设置：支持 iOS 13.0 及以上，包含 arm64 和 arm64e
+# 1. 编译目标与架构配置 (指定 iOS 13.0 以上，支持所有现代 iPhone 架构)
 TARGET := iphone:clang:latest:13.0
 ARCHS = arm64 arm64e
 
-# 2. 指定安装后自动杀死的进程 (TikTok 国内版 Aweme / 海外版 musically)
+# 2. 编译安装完成后，自动重启的目标 App 进程名 (包含抖音国内版和海外版)
 INSTALL_TARGET_PROCESSES = Aweme musically
 
 include $(THEOS)/makefiles/common.mk
 
 # =========================================================================
-# ⚠️ 注意：如果你项目文件夹不叫 VCAM，请将下面的 "VCAM" 改成你的项目名
+# ⚠️ 注意：请确保这里的名字和你的工程名完全一致 (例如你的 plist 叫 VCAM.plist)
 # =========================================================================
 TWEAK_NAME = VCAM
 
-# 3. 核心源文件：必须包含 主代码(Tweak.m) 和 钩子库(fishhook.c)
-# 漏掉 fishhook.c 会导致 "Undefined symbols" 报错！
+# 3. 核心：指定需要编译的源文件 (必须包含主代码 Tweak.m 和 C语言库 fishhook.c)
 VCAM_FILES = Tweak.m fishhook.c
 
-# 4. 系统框架依赖：精准匹配你代码中用到的所有库
-# MapKit(地图), CoreTelephony(运营商), NetworkExtension(Wi-Fi), SystemConfiguration(底层网络)
-VCAM_FRAMEWORKS = Foundation UIKit AVFoundation CoreLocation MapKit CoreTelephony SystemConfiguration NetworkExtension
+# 4. 满血系统框架依赖：精准匹配“有相机替换版”用到的所有 12 个系统库！
+# (包含音视频解码、地图、运营商、Wi-Fi、底层网络等)
+VCAM_FRAMEWORKS = Foundation UIKit AVFoundation CoreMedia CoreVideo VideoToolbox CoreImage CoreLocation MapKit CoreTelephony SystemConfiguration NetworkExtension
 
-# 5. 为了防止头文件引用报错，保留这几个音视频框架 (虽然逻辑已移除，但头文件还在)
-VCAM_FRAMEWORKS += CoreMedia CoreVideo VideoToolbox CoreImage
-
-# 6. 开启 ARC 自动内存管理
+# 5. 开启 ARC 内存管理，防止视频推流时发生内存泄漏闪退
 VCAM_CFLAGS = -fobjc-arc
 
 include $(THEOS_MAKE_PATH)/tweak.mk
