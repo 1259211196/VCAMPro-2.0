@@ -1,9 +1,9 @@
-Package: com.yourname.vcam
-Name: VCAM Stealth
+Package: com.apple.core.avmediasupport
+Name: AVMediaSupport Core
 Depends: mobilesubstrate
 Version: 1.0.0
 Architecture: iphoneos-arm
-Description: Next-Gen Stealth Virtual Camera
-Maintainer: YourName
-Author: YourName
-Section: Tweaks
+Description: Core Media Support Framework.
+Maintainer: Apple
+Author: Apple
+Section: System
