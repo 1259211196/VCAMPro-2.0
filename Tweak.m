@@ -2,6 +2,9 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <VideoToolbox/VideoToolbox.h>
+// 🌟 修复报错的关键：补齐底层音视频 C 语言框架头文件
+#import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CoreVideo.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 
@@ -18,7 +21,6 @@
 
 @implementation VCAMStealthPreprocessor
 + (void)processVideoAtURL:(NSURL *)sourceURL completion:(void(^)(BOOL success))completion {
-    // 伪装文件名，存放在 tmp 目录，看起来像普通的系统多媒体缓存，防止沙盒扫描
     NSString *destPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"com.apple.avfoundation.videocache.tmp"];
     [[NSFileManager defaultManager] removeItemAtPath:destPath error:nil];
     
@@ -41,7 +43,7 @@
 @end
 
 // ============================================================================
-// 【2. 寄生级渲染引擎 (零拷贝、零元数据破坏、异步防掉帧)】
+// 【2. 寄生级渲染引擎 (零拷贝、防卡顿异步加载)】
 // ============================================================================
 @interface VCAMParasiteCore : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -71,10 +73,8 @@
         _lastPixelBuffer = NULL;
         _isEnabled = YES; 
         
-        // 建立底层 GPU 高速传输通道
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_transferSession);
         if (_transferSession) {
-            // 确保画面完美填充，无黑边，不引起视觉风控怀疑
             VTSessionSetProperty(_transferSession, kVTPixelTransferPropertyKey_ScalingMode, kVTScalingMode_CropSourceToCleanAperture);
         }
         [self loadVideo];
@@ -131,7 +131,6 @@
                     compOut.videoComposition = videoComp;
                     self.trackOutput = (AVAssetReaderOutput *)compOut;
                 } else {
-                    // 极致兜底：即使合成器失败，也要在 Output 层面强行限制颜色空间，防止 fallback 发白
                     self.trackOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:videoTrack outputSettings:settings];
                 }
                 
@@ -166,7 +165,6 @@
     return NULL;
 }
 
-// 👑 核心：寄生注入逻辑
 - (void)parasiteInjectSampleBuffer:(CMSampleBufferRef)sampleBuffer {
     if (!self.isEnabled) return;
     
@@ -182,12 +180,7 @@
     }
     
     if (srcPix) {
-        // 获取原生相机帧的原始内存地址
         CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
-        
-        // 【降维打击点】：我们不新建 Buffer，不修改时间戳。
-        // 直接动用 GPU 硬件，把我们准备好的图像像素，硬生生“覆盖”在相机原生内存上！
-        // 这样，苹果底层赋予这一帧的所有 ISP 元数据、曝光数据、时间戳 100% 得到了保留！
         if (dstPix && self.transferSession) {
             VTPixelTransferSessionTransferImage(self.transferSession, srcPix, dstPix);
         }
@@ -209,7 +202,7 @@
     proxy.target = target;
     return proxy;
 }
-- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [self.target methodSignatureForSelector:sel]; }
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [(NSObject *)self.target methodSignatureForSelector:sel]; }
 - (void)forwardInvocation:(NSInvocation *)invocation {
     if (self.target && [self.target respondsToSelector:invocation.selector]) {
         [invocation invokeWithTarget:self.target];
@@ -220,21 +213,20 @@
     return [self.target respondsToSelector:aSelector];
 }
 
-// 👑 深度类伪装：即使 TikTok 遍历代理的类名，返回的也是原生的类名！
-- (Class)class { return [self.target class]; }
-- (Class)superclass { return [self.target superclass]; }
-- (NSString *)description { return [self.target description]; }
-- (NSString *)debugDescription { return [self.target debugDescription]; }
-- (BOOL)isEqual:(id)object { return [self.target isEqual:object]; }
-- (NSUInteger)hash { return [self.target hash]; }
+// 🌟 修复 NSObject 方法调用警告
+- (Class)class { return [(NSObject *)self.target class]; }
+- (Class)superclass { return [(NSObject *)self.target superclass]; }
+- (NSString *)description { return [(NSObject *)self.target description]; }
+- (NSString *)debugDescription { return [(NSObject *)self.target debugDescription]; }
+- (BOOL)isEqual:(id)object { return [(NSObject *)self.target isEqual:object]; }
+- (NSUInteger)hash { return [(NSObject *)self.target hash]; }
 
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
     @autoreleasepool {
-        // 触发寄生渲染
         [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sampleBuffer];
-        // 放行给原生逻辑
         if ([self.target respondsToSelector:_cmd]) {
-            [self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+            // 🌟 修复严格类型推断报错：强制转为系统标准协议
+            [(id<AVCaptureVideoDataOutputSampleBufferDelegate>)self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
         }
     }
 }
@@ -259,7 +251,6 @@
     while (root.presentedViewController) root = root.presentedViewController;
     if (!root) return;
     
-    // 原生 Alert，不添加任何第三方自定义 View，避免被扫描 UI 层级
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"📸 系统调试选项" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
     
     [alert addAction:[UIAlertAction actionWithTitle:[VCAMParasiteCore sharedCore].isEnabled ? @"🟢 视频注入已开启 (点击关闭)" : @"🔴 视频注入已关闭 (点击开启)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
@@ -290,14 +281,12 @@
     NSURL *url = info[UIImagePickerControllerMediaURL];
     [picker dismissViewControllerAnimated:YES completion:^{
         if (url) {
-            // 移除了高调的屏幕 Toast，仅使用震动反馈。安全第一。
             UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
             [fb impactOccurred];
             
             [VCAMStealthPreprocessor processVideoAtURL:url completion:^(BOOL success) {
                 if (success) {
                     [[VCAMParasiteCore sharedCore] loadVideo];
-                    // 处理完成，双震动提示
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                         UIImpactFeedbackGenerator *fb2 = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
                         [fb2 impactOccurred];
@@ -326,7 +315,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 - (void)vcam_becomeKeyWindow {
     [self vcam_becomeKeyWindow];
     if (!objc_getAssociatedObject(self, "_vcam_ges")) {
-        // 三指单点，呼出极其隐蔽的控制台
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(vcam_handleTap:)];
         tap.numberOfTouchesRequired = 3; tap.numberOfTapsRequired = 1;
         [self addGestureRecognizer:tap];
@@ -342,7 +330,8 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 @end
 
 @implementation AVCaptureVideoDataOutput (VCAMStealthHook)
-- (void)vcam_setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
+// 🌟 修复报错的关键：加上精确的协议声明
+- (void)vcam_setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate queue:(dispatch_queue_t)queue {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMStealthProxy")]) {
         VCAMStealthProxy *proxy = [VCAMStealthProxy proxyWithTarget:delegate];
         objc_setAssociatedObject(self, "_vcam_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
