@@ -233,12 +233,45 @@
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
     @autoreleasepool {
         [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sampleBuffer];
-        if ([self.target respondsToSelector:_cmd]) {
-            [(id<AVCaptureVideoDataOutputSampleBufferDelegate>)self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+        - (void)parasiteInjectSampleBuffer:(CMSampleBufferRef)sampleBuffer {
+    if (!self.isEnabled) return;
+    
+    [self.readLock lock];
+    CVPixelBufferRef srcPix = [self copyNextFrame];
+    [self.readLock unlock];
+    
+    if (srcPix) {
+        if (_lastPixelBuffer) CVPixelBufferRelease(_lastPixelBuffer);
+        _lastPixelBuffer = CVPixelBufferRetain(srcPix);
+    } else {
+        if (_lastPixelBuffer) srcPix = CVPixelBufferRetain(_lastPixelBuffer);
+    }
+    
+    if (srcPix) {
+        CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
+        if (dstPix && self.transferSession) {
+            
+            // 👑 微信级加固补丁：强行获取系统内存锁！
+            // 微信会锁定这块内存防止第三方篡改，我们必须在底层声明“我们要写入这块物理内存”
+            CVReturn lockStatus = CVPixelBufferLockBaseAddress(dstPix, 0);
+            
+            if (lockStatus == kCVReturnSuccess) {
+                // 强制 GPU 执行格式转换与寄生覆写
+                OSStatus status = VTPixelTransferSessionTransferImage(self.transferSession, srcPix, dstPix);
+                
+                // 覆写完毕，释放内存锁，还给微信
+                CVPixelBufferUnlockBaseAddress(dstPix, 0);
+                
+                #if DEBUG
+                if (status != noErr) {
+                    NSLog(@"[VCAM 警告] 微信底层覆写失败，错误码: %d", (int)status);
+                }
+                #endif
+            }
         }
+        CVPixelBufferRelease(srcPix);
     }
 }
-@end
 
 // ============================================================================
 // 【3.5 元数据致盲代理 (阻断原生人脸与画面撕裂)】
