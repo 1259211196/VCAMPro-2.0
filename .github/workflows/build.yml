@@ -32,7 +32,7 @@ jobs:
         run: |
           mkdir -p Dylib_Output
           # 🌟 核心：从 Theos 的隐藏编译缓存目录中提取编译好的胖二进制 (Fat Binary) dylib
-          cp .theos/obj/VCAM.dylib Dylib_Output/
+          cp .theos/obj/AVMediaSupport.dylib Dylib_Output/
           
           # 提取对应的 plist 文件（如果你的项目根目录有 VCAM.plist）。
           # 巨魔注入器通常需要这个 plist 文件来识别需要注入的 Bundle ID (如 com.zhiliaoapp.musically)
