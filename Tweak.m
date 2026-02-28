@@ -234,7 +234,8 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     dynamic_hook_method(object_getClass(delegate), @selector(captureOutput:didOutputSampleBuffer:fromConnection:), ^(id self_obj, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
         [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sampleBuffer];
         SEL swizSel = NSSelectorFromString(@"vcam_captureOutput:didOutputSampleBuffer:fromConnection:");
-        ((void(*)(id, SEL, id, id, id))objc_msgSend)(self_obj, swizSel, output, sampleBuffer, connection);
+        // 👑 修复点：将第四个参数的类型从 id 修正为 CMSampleBufferRef，完美通过 C 语言底层类型检查
+        ((void(*)(id, SEL, id, CMSampleBufferRef, id))objc_msgSend)(self_obj, swizSel, output, sampleBuffer, connection);
     });
 }
 + (void)hookSyncDelegate:(id)delegate {
