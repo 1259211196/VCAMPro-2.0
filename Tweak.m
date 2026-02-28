@@ -26,6 +26,25 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     else { method_exchangeImplementations(originalMethod, swizzledMethod); }
 }
 
+// 👑 核武级：动态基因注入引擎 (直接篡改宿主对象内存，无视任何类型检测)
+static void dynamic_hook_method(Class cls, SEL origSel, id block) {
+    if (!cls || !origSel || !block) return;
+    NSString *selName = NSStringFromSelector(origSel);
+    SEL swizSel = NSSelectorFromString([NSString stringWithFormat:@"vcam_%@", selName]);
+    if (class_getInstanceMethod(cls, swizSel)) return; // 防止重复注入
+    
+    Method origMethod = class_getInstanceMethod(cls, origSel);
+    if (!origMethod) return; // 宿主没有实现此功能，跳过
+    
+    IMP swizImp = imp_implementationWithBlock(block);
+    class_addMethod(cls, swizSel, swizImp, method_getTypeEncoding(origMethod));
+    Method swizMethod = class_getInstanceMethod(cls, swizSel);
+    
+    BOOL didAdd = class_addMethod(cls, origSel, method_getImplementation(swizMethod), method_getTypeEncoding(origMethod));
+    if (didAdd) { class_replaceMethod(cls, swizSel, method_getImplementation(origMethod), method_getTypeEncoding(origMethod)); } 
+    else { method_exchangeImplementations(origMethod, swizMethod); }
+}
+
 // ============================================================================
 // 【1. 动态真机硬件信息抓取】
 // ============================================================================
@@ -90,12 +109,12 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @end
 
 // ============================================================================
-// 【3. 寄生级渲染引擎 (👑 核心升级：CIContext 无视硬件锁强制覆写)】
+// 【3. 寄生级渲染引擎 (CIContext Metal级强制覆写)】
 // ============================================================================
 @interface VCAMParasiteCore : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
 @property (nonatomic, strong) AVAssetReaderOutput *trackOutput;
-@property (nonatomic, strong) CIContext *ciContext; // 🌟 抛弃 VTPixelTransferSession，启用 Metal 核心强制渲染
+@property (nonatomic, strong) CIContext *ciContext; // 🌟 抛弃硬件锁，采用 GPU 级核心渲染
 @property (nonatomic, strong) NSLock *readLock;
 @property (nonatomic, assign) CVPixelBufferRef lastPixelBuffer;
 @property (nonatomic, assign) BOOL isEnabled;
@@ -116,7 +135,6 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     if (self = [super init]) {
         _readLock = [[NSLock alloc] init]; _lastPixelBuffer = NULL; _isEnabled = YES; 
         _lastFrameTime = 0.0; _videoFrameDuration = 1.0 / 30.0;
-        // 🌟 初始化高等级 Metal 渲染上下文，无视颜色空间封锁
         _ciContext = [CIContext contextWithOptions:@{ kCIContextWorkingColorSpace : [NSNull null] }];
         [self loadVideo];
     } return self;
@@ -163,8 +181,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     }
     return NULL;
 }
-
-// 👑 终极渲染核心：无视物理只读锁，利用 CIContext 强行烙印像素！
+// 👑 终极写入法：暴力突破内存锁
 - (void)injectPixelBuffer:(CVPixelBufferRef)dstPix {
     if (!self.isEnabled || !dstPix) return;
     [self.readLock lock]; CVPixelBufferRef srcPix = [self copyNextFrame]; [self.readLock unlock];
@@ -179,7 +196,6 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
         CGFloat srcH = CVPixelBufferGetHeight(srcPix);
         
         if (dstW > 0 && dstH > 0 && srcW > 0 && srcH > 0) {
-            // 完美等比裁剪并缩放，杜绝黑边和越界报错
             CGFloat scale = MAX(dstW / srcW, dstH / srcH);
             srcImage = [srcImage imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
             CGFloat tx = (srcImage.extent.size.width - dstW) / 2.0;
@@ -187,8 +203,10 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
             srcImage = [srcImage imageByCroppingToRect:CGRectMake(tx, ty, dstW, dstH)];
             srcImage = [srcImage imageByApplyingTransform:CGAffineTransformMakeTranslation(-tx, -ty)];
             
-            // 🌟 强行写入目标物理相机显存！
+            // 锁定系统显存底座，强行烧录画面
+            CVPixelBufferLockBaseAddress(dstPix, 0);
             [self.ciContext render:srcImage toCVPixelBuffer:dstPix];
+            CVPixelBufferUnlockBaseAddress(dstPix, 0);
         }
         CVPixelBufferRelease(srcPix);
     }
@@ -201,40 +219,27 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @end
 
 // ============================================================================
-// 【4. 隐形环境伪装代理 (👑 拦截 TikTok 全系 AR 与原生通道)】
+// 【4. 隐形环境伪装代理 (抛弃 NSProxy，纯粹基因写入)】
 // ============================================================================
-@interface VCAMStealthProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureMetadataOutputObjectsDelegate, AVCaptureDataOutputSynchronizerDelegate>
-@property (nonatomic, weak) id target;
+@interface VCAMDelegateHooker : NSObject
++ (void)hookVideoDelegate:(id)delegate;
++ (void)hookSyncDelegate:(id)delegate;
++ (void)hookARDelegate:(id)delegate;
++ (void)hookMetadataDelegate:(id)delegate;
 @end
-@implementation VCAMStealthProxy
-+ (instancetype)proxyWithTarget:(id)target { VCAMStealthProxy *proxy = [VCAMStealthProxy alloc]; proxy.target = target; return proxy; }
-- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
-    if (self.target && [self.target respondsToSelector:sel]) return [(NSObject *)self.target methodSignatureForSelector:sel];
-    return [NSMethodSignature signatureWithObjCTypes:"v@:"]; // 防止崩溃的安全垫
-}
-- (void)forwardInvocation:(NSInvocation *)invocation { if (self.target && [self.target respondsToSelector:invocation.selector]) [invocation invokeWithTarget:self.target]; }
 
-// 完美模拟代理响应，彻底骗过内部检查协议
-- (BOOL)respondsToSelector:(SEL)aSelector {
-    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) || 
-        aSelector == @selector(captureOutput:didOutputMetadataObjects:fromConnection:) ||
-        aSelector == @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:) ||
-        aSelector == NSSelectorFromString(@"session:didUpdateFrame:")) return YES;
-    return [self.target respondsToSelector:aSelector];
-}
-- (BOOL)conformsToProtocol:(Protocol *)aProtocol { return [self.target conformsToProtocol:aProtocol]; }
-- (BOOL)isKindOfClass:(Class)aClass { return [self.target isKindOfClass:aClass]; }
-
-// 拦截通道 1：普通采集
-- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-    @autoreleasepool { 
+@implementation VCAMDelegateHooker
++ (void)hookVideoDelegate:(id)delegate {
+    if (!delegate) return;
+    dynamic_hook_method(object_getClass(delegate), @selector(captureOutput:didOutputSampleBuffer:fromConnection:), ^(id self_obj, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
         [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sampleBuffer];
-        if ([self.target respondsToSelector:_cmd]) { [(id)self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection]; }
-    }
+        SEL swizSel = NSSelectorFromString(@"vcam_captureOutput:didOutputSampleBuffer:fromConnection:");
+        ((void(*)(id, SEL, id, id, id))objc_msgSend)(self_obj, swizSel, output, sampleBuffer, connection);
+    });
 }
-// 拦截通道 2：VIP 混合采集
-- (void)dataOutputSynchronizer:(AVCaptureDataOutputSynchronizer *)synchronizer didOutputSynchronizedDataCollection:(AVCaptureSynchronizedDataCollection *)synchronizedDataCollection {
-    @autoreleasepool {
++ (void)hookSyncDelegate:(id)delegate {
+    if (!delegate) return;
+    dynamic_hook_method(object_getClass(delegate), @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:), ^(id self_obj, AVCaptureDataOutputSynchronizer *synchronizer, AVCaptureSynchronizedDataCollection *synchronizedDataCollection) {
         for (AVCaptureOutput *out in synchronizer.dataOutputs) {
             if ([out isKindOfClass:NSClassFromString(@"AVCaptureVideoDataOutput")]) { 
                 AVCaptureSynchronizedData *syncData = [synchronizedDataCollection synchronizedDataForCaptureOutput:out];
@@ -244,28 +249,28 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
                 } 
             } 
         }
-        if ([self.target respondsToSelector:_cmd]) { [(id)self.target dataOutputSynchronizer:synchronizer didOutputSynchronizedDataCollection:synchronizedDataCollection]; }
-    }
+        SEL swizSel = NSSelectorFromString(@"vcam_dataOutputSynchronizer:didOutputSynchronizedDataCollection:");
+        ((void(*)(id, SEL, id, id))objc_msgSend)(self_obj, swizSel, synchronizer, synchronizedDataCollection);
+    });
 }
-// 👑 拦截通道 3：TikTok 专属 ARKit 幽灵逃逸通道 (核心杀招)
-- (void)session:(id)session didUpdateFrame:(id)frame {
-    @autoreleasepool {
++ (void)hookARDelegate:(id)delegate {
+    if (!delegate) return;
+    dynamic_hook_method(object_getClass(delegate), @selector(session:didUpdateFrame:), ^(id self_obj, id session, id frame) {
         if ([frame respondsToSelector:@selector(capturedImage)]) {
             CVPixelBufferRef pixelBuffer = ((CVPixelBufferRef (*)(id, SEL))objc_msgSend)(frame, @selector(capturedImage));
             if (pixelBuffer) [[VCAMParasiteCore sharedCore] injectPixelBuffer:pixelBuffer];
         }
-        if ([self.target respondsToSelector:_cmd]) { [(id)self.target session:session didUpdateFrame:frame]; }
-    }
+        SEL swizSel = NSSelectorFromString(@"vcam_session:didUpdateFrame:");
+        ((void(*)(id, SEL, id, id))objc_msgSend)(self_obj, swizSel, session, frame);
+    });
 }
-// 致盲通道
-- (void)captureOutput:(AVCaptureOutput *)output didOutputMetadataObjects:(NSArray *)metadataObjects fromConnection:(AVCaptureConnection *)connection {
-    @autoreleasepool {
-        if ([VCAMParasiteCore sharedCore].isEnabled) {
-            if ([self.target respondsToSelector:_cmd]) { [(id)self.target captureOutput:output didOutputMetadataObjects:@[] fromConnection:connection]; }
-        } else {
-            if ([self.target respondsToSelector:_cmd]) { [(id)self.target captureOutput:output didOutputMetadataObjects:metadataObjects fromConnection:connection]; }
-        }
-    }
++ (void)hookMetadataDelegate:(id)delegate {
+    if (!delegate) return;
+    dynamic_hook_method(object_getClass(delegate), @selector(captureOutput:didOutputMetadataObjects:fromConnection:), ^(id self_obj, AVCaptureOutput *output, NSArray *metadataObjects, AVCaptureConnection *connection) {
+        NSArray *finalMeta = [VCAMParasiteCore sharedCore].isEnabled ? @[] : metadataObjects;
+        SEL swizSel = NSSelectorFromString(@"vcam_captureOutput:didOutputMetadataObjects:fromConnection:");
+        ((void(*)(id, SEL, id, id, id))objc_msgSend)(self_obj, swizSel, output, finalMeta, connection);
+    });
 }
 @end
 
@@ -305,7 +310,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
                         UIImpactFeedbackGenerator *fb2 = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [fb2 impactOccurred];
                     });
                 } else {
-                    UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"该视频编码不兼容或已损坏，请使用标准的 MP4 格式视频重试。" preferredStyle:UIAlertControllerStyleAlert];
+                    UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"视频格式不兼容。" preferredStyle:UIAlertControllerStyleAlert];
                     [err addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                     [root presentViewController:err animated:YES completion:nil];
                 }
@@ -346,31 +351,26 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 }
 @end
 
-// 🌟 终极防御 1：硬件镜头伪装
+// 🌟 防御拦截系统
 @implementation AVCaptureDevice (VCAMStealthHook)
 - (AVCaptureDeviceType)vcam_deviceType {
     AVCaptureDeviceType type = [self vcam_deviceType];
-    if (IS_FAKE_CAM(type)) return AVCaptureDeviceTypeBuiltInWideAngleCamera;
-    return type;
+    if (IS_FAKE_CAM(type)) return AVCaptureDeviceTypeBuiltInWideAngleCamera; return type;
 }
 - (NSString *)vcam_modelID {
     NSString *orig = [self vcam_modelID];
-    if (IS_FAKE_CAM(orig)) return @"com.apple.avfoundation.avcapturedevice.built-in_video:0";
-    return orig;
+    if (IS_FAKE_CAM(orig)) return @"com.apple.avfoundation.avcapturedevice.built-in_video:0"; return orig;
 }
 - (NSString *)vcam_localizedName {
     NSString *orig = [self vcam_localizedName];
-    if (IS_FAKE_CAM(orig)) return @"Back Camera";
-    return orig;
+    if (IS_FAKE_CAM(orig)) return @"Back Camera"; return orig;
 }
 - (NSString *)vcam_manufacturer {
     NSString *orig = [self vcam_manufacturer];
-    if (IS_FAKE_CAM(orig)) return @"Apple Inc.";
-    return orig;
+    if (IS_FAKE_CAM(orig)) return @"Apple Inc."; return orig;
 }
 @end
 
-// 🌟 终极防御 2：写入护盾与 EXIF 净化
 @implementation AVAssetExportSession (VCAMStealthHook)
 - (void)vcam_setMetadata:(NSArray<AVMetadataItem *> *)metadata {
     NSMutableArray *pureMetadata = [NSMutableArray array];
@@ -387,62 +387,29 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @end
 
 @implementation AVAsset (VCAMStealthHook)
-- (NSArray<AVMetadataItem *> *)vcam_metadata {
-    if ([self isKindOfClass:[AVURLAsset class]]) {
-        NSURL *url = [(AVURLAsset *)self URL];
-        if (![url isFileURL] || [[url path] containsString:@"/Library/Caches/"] || [[url path] containsString:@"/tmp/"]) return [self vcam_metadata];
-    } return cleanAndSpoofMetadataArray([self vcam_metadata]);
-}
-- (NSArray<AVMetadataItem *> *)vcam_commonMetadata {
-    if ([self isKindOfClass:[AVURLAsset class]]) {
-        NSURL *url = [(AVURLAsset *)self URL];
-        if (![url isFileURL] || [[url path] containsString:@"/Library/Caches/"] || [[url path] containsString:@"/tmp/"]) return [self vcam_commonMetadata];
-    } return cleanAndSpoofMetadataArray([self vcam_commonMetadata]);
-}
+- (NSArray<AVMetadataItem *> *)vcam_metadata { return cleanAndSpoofMetadataArray([self vcam_metadata]); }
+- (NSArray<AVMetadataItem *> *)vcam_commonMetadata { return cleanAndSpoofMetadataArray([self vcam_commonMetadata]); }
 @end
 
+// 🌟 动态宿主挂载点
 @implementation AVCaptureVideoDataOutput (VCAMStealthHook)
 - (void)vcam_setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMStealthProxy")]) {
-        VCAMStealthProxy *proxy = [VCAMStealthProxy proxyWithTarget:delegate];
-        objc_setAssociatedObject(self, "_vcam_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [self vcam_setSampleBufferDelegate:proxy queue:queue];
-    } else { [self vcam_setSampleBufferDelegate:delegate queue:queue]; }
+    [VCAMDelegateHooker hookVideoDelegate:delegate]; [self vcam_setSampleBufferDelegate:delegate queue:queue];
 }
 @end
 @implementation AVCaptureMetadataOutput (VCAMStealthHook)
 - (void)vcam_setMetadataObjectsDelegate:(id<AVCaptureMetadataOutputObjectsDelegate>)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMStealthProxy")]) {
-        VCAMStealthProxy *proxy = [VCAMStealthProxy proxyWithTarget:delegate];
-        objc_setAssociatedObject(self, "_vcam_meta_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [self vcam_setMetadataObjectsDelegate:proxy queue:queue];
-    } else { [self vcam_setMetadataObjectsDelegate:delegate queue:queue]; }
+    [VCAMDelegateHooker hookMetadataDelegate:delegate]; [self vcam_setMetadataObjectsDelegate:delegate queue:queue];
 }
-@end
-@interface AVCaptureDataOutputSynchronizer (VCAMStealthHook)
-- (void)vcam_setDelegate:(id<AVCaptureDataOutputSynchronizerDelegate>)delegate queue:(dispatch_queue_t)queue;
-@end
-@implementation AVCaptureDataOutputSynchronizer (VCAMStealthHook)
-- (void)vcam_setDelegate:(id<AVCaptureDataOutputSynchronizerDelegate>)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMStealthProxy")]) {
-        VCAMStealthProxy *proxy = [VCAMStealthProxy proxyWithTarget:delegate];
-        objc_setAssociatedObject(self, "_vcam_sync_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [self vcam_setDelegate:proxy queue:queue];
-    } else { [self vcam_setDelegate:delegate queue:queue]; }
-}
-@end
-
-// 🌟 终极防御 3：ARSession 幽灵挂载
-@interface NSObject (VCAMARSessionHook)
-- (void)vcam_setDelegate:(id)delegate queue:(dispatch_queue_t)queue;
 @end
 @implementation NSObject (VCAMARSessionHook)
 - (void)vcam_setDelegate:(id)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMStealthProxy")]) {
-        VCAMStealthProxy *proxy = [VCAMStealthProxy proxyWithTarget:delegate];
-        objc_setAssociatedObject(self, "_vcam_ar_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [self vcam_setDelegate:proxy queue:queue];
-    } else { [self vcam_setDelegate:delegate queue:queue]; }
+    if ([self isKindOfClass:NSClassFromString(@"AVCaptureDataOutputSynchronizer")]) { [VCAMDelegateHooker hookSyncDelegate:delegate]; }
+    [self vcam_setDelegate:delegate queue:queue];
+}
+- (void)vcam_setDelegate:(id)delegate {
+    if ([self isKindOfClass:NSClassFromString(@"ARSession")]) { [VCAMDelegateHooker hookARDelegate:delegate]; }
+    [self vcam_setDelegate:delegate];
 }
 @end
 
@@ -467,14 +434,8 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     Class exportSessionClass = NSClassFromString(@"AVAssetExportSession");
     if (exportSessionClass) safe_swizzle(exportSessionClass, @selector(setMetadata:), @selector(vcam_setMetadata:));
     
-    Class urlAssetClass = NSClassFromString(@"AVURLAsset");
-    if (urlAssetClass) {
-        safe_swizzle(urlAssetClass, @selector(metadata), @selector(vcam_metadata));
-        safe_swizzle(urlAssetClass, @selector(commonMetadata), @selector(vcam_commonMetadata));
-    }
-    
     Class assetClass = NSClassFromString(@"AVAsset");
-    if (assetClass && assetClass != urlAssetClass) {
+    if (assetClass) {
         safe_swizzle(assetClass, @selector(metadata), @selector(vcam_metadata));
         safe_swizzle(assetClass, @selector(commonMetadata), @selector(vcam_commonMetadata));
     }
@@ -488,9 +449,8 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     Class syncClass = NSClassFromString(@"AVCaptureDataOutputSynchronizer");
     if (syncClass) safe_swizzle(syncClass, @selector(setDelegate:queue:), @selector(vcam_setDelegate:queue:));
     
-    // 🌟 封堵最终后门：ARSession 接管
     Class arClass = NSClassFromString(@"ARSession");
-    if (arClass) safe_swizzle(arClass, @selector(setDelegate:queue:), @selector(vcam_setDelegate:queue:));
+    if (arClass) safe_swizzle(arClass, @selector(setDelegate:), @selector(vcam_setDelegate:));
 }
 @end
 #pragma clang diagnostic pop
