@@ -88,7 +88,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 }
 
 // ============================================================================
-// 【2. 无痕转码引擎 (伪装成系统缓存文件)】
+// 【2. 无痕转码引擎 (修复了静默死锁)】
 // ============================================================================
 @interface VCAMStealthPreprocessor : NSObject
 + (void)processVideoAtURL:(NSURL *)sourceURL completion:(void(^)(BOOL success))completion;
@@ -102,18 +102,24 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     exportSession.outputURL = [NSURL fileURLWithPath:destPath];
     exportSession.outputFileType = AVFileTypeMPEG4;
     exportSession.shouldOptimizeForNetworkUse = YES;
-    exportSession.metadata = @[]; // 强制清空转码元数据
+    
+    // 👑 修复：删除了会导致与护盾死锁的 metadata 清空代码
     [exportSession exportAsynchronouslyWithCompletionHandler:^{
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (exportSession.status == AVAssetExportSessionStatusCompleted) { if (completion) completion(YES); } 
-            else { if (completion) completion(NO); }
+            if (exportSession.status == AVAssetExportSessionStatusCompleted) { 
+                if (completion) completion(YES); 
+            } else { 
+                // 记录真实的底层报错，不再静默死亡
+                NSLog(@"[VCAM 警告] 视频转码失败: %@", exportSession.error);
+                if (completion) completion(NO); 
+            }
         });
     }];
 }
 @end
 
 // ============================================================================
-// 【3. 寄生级渲染引擎 (零拷贝、防卡顿异步加载 + 动态帧率自适应节流阀)】
+// 【3. 寄生级渲染引擎 (防黑屏 + 动态帧率自适应节流阀)】
 // ============================================================================
 @interface VCAMParasiteCore : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -161,13 +167,20 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
                 if (fps <= 0.0) fps = 30.0;
                 self.videoFrameDuration = 1.0 / fps;
                 NSDictionary *settings = @{ (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA), (id)kCVPixelBufferIOSurfacePropertiesKey: @{} };
+                
                 AVMutableVideoComposition *videoComp = nil;
                 @try {
                     videoComp = (AVMutableVideoComposition *)[AVVideoComposition videoCompositionWithPropertiesOfAsset:asset];
-                    videoComp.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2;
-                    videoComp.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2;
-                    videoComp.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2;
+                    // 👑 核心修复：拦截 0x0 矩阵导致的死机黑屏
+                    if (CGSizeEqualToSize(videoComp.renderSize, CGSizeZero)) {
+                        videoComp = nil;
+                    } else {
+                        videoComp.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2;
+                        videoComp.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2;
+                        videoComp.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2;
+                    }
                 } @catch (NSException *e) { videoComp = nil; }
+                
                 if (videoComp) {
                     AVAssetReaderVideoCompositionOutput *compOut = [AVAssetReaderVideoCompositionOutput assetReaderVideoCompositionOutputWithVideoTracks:@[videoTrack] videoSettings:settings];
                     compOut.videoComposition = videoComp; self.trackOutput = (AVAssetReaderOutput *)compOut;
@@ -245,7 +258,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @end
 
 // ============================================================================
-// 【5. 隐身控制台】
+// 【5. 隐身控制台 (带错误回显)】
 // ============================================================================
 @interface VCAMStealthUIManager : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 + (instancetype)sharedManager; - (void)showStealthMenuInWindow:(UIWindow *)window;
@@ -269,6 +282,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 }
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info {
     NSURL *url = info[UIImagePickerControllerMediaURL];
+    UIViewController *root = picker.presentingViewController; // 👑 提前捕获根控制器用于错误弹窗
     [picker dismissViewControllerAnimated:YES completion:^{
         if (url) {
             UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid]; [fb impactOccurred];
@@ -278,6 +292,11 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                         UIImpactFeedbackGenerator *fb2 = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [fb2 impactOccurred];
                     });
+                } else {
+                    // 👑 修复盲区：导入失败后的 UI 警告反馈
+                    UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"该视频编码不兼容或已损坏，请使用标准的 MP4 格式视频重试。" preferredStyle:UIAlertControllerStyleAlert];
+                    [err addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
+                    [root presentViewController:err animated:YES completion:nil];
                 }
             }];
         }
@@ -306,7 +325,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
         objc_setAssociatedObject(self, "_vcam_ges", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
-// 🌟 终极修复：双管齐下拦截生命周期，三指手势 100% 挂载
+// 🌟 双管齐下拦截生命周期，三指手势 100% 挂载
 - (void)vcam_becomeKeyWindow { [self vcam_becomeKeyWindow]; [self vcam_setupGestures]; }
 - (void)vcam_makeKeyAndVisible { [self vcam_makeKeyAndVisible]; [self vcam_setupGestures]; }
 - (void)vcam_handleTap:(UITapGestureRecognizer *)g {
