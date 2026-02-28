@@ -88,7 +88,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 }
 
 // ============================================================================
-// 【2. 无痕转码引擎 (修复了静默死锁)】
+// 【2. 无痕转码引擎 (防静默死锁版)】
 // ============================================================================
 @interface VCAMStealthPreprocessor : NSObject
 + (void)processVideoAtURL:(NSURL *)sourceURL completion:(void(^)(BOOL success))completion;
@@ -103,13 +103,11 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     exportSession.outputFileType = AVFileTypeMPEG4;
     exportSession.shouldOptimizeForNetworkUse = YES;
     
-    // 👑 修复：删除了会导致与护盾死锁的 metadata 清空代码
     [exportSession exportAsynchronouslyWithCompletionHandler:^{
         dispatch_async(dispatch_get_main_queue(), ^{
             if (exportSession.status == AVAssetExportSessionStatusCompleted) { 
                 if (completion) completion(YES); 
             } else { 
-                // 记录真实的底层报错，不再静默死亡
                 NSLog(@"[VCAM 警告] 视频转码失败: %@", exportSession.error);
                 if (completion) completion(NO); 
             }
@@ -119,7 +117,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @end
 
 // ============================================================================
-// 【3. 寄生级渲染引擎 (防黑屏 + 动态帧率自适应节流阀)】
+// 【3. 寄生级渲染引擎 (防 0x0 黑屏 + 动态帧率自适应)】
 // ============================================================================
 @interface VCAMParasiteCore : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -171,7 +169,6 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
                 AVMutableVideoComposition *videoComp = nil;
                 @try {
                     videoComp = (AVMutableVideoComposition *)[AVVideoComposition videoCompositionWithPropertiesOfAsset:asset];
-                    // 👑 核心修复：拦截 0x0 矩阵导致的死机黑屏
                     if (CGSizeEqualToSize(videoComp.renderSize, CGSizeZero)) {
                         videoComp = nil;
                     } else {
@@ -226,26 +223,49 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 @end
 
 // ============================================================================
-// 【4. 隐形环境伪装代理 (多重防护)】
+// 【4. 隐形环境伪装代理 (全通道同步器拦截版)】
 // ============================================================================
-@interface VCAMStealthProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureMetadataOutputObjectsDelegate>
+@interface VCAMStealthProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureMetadataOutputObjectsDelegate, AVCaptureDataOutputSynchronizerDelegate>
 @property (nonatomic, weak) id target;
 @end
+
 @implementation VCAMStealthProxy
 + (instancetype)proxyWithTarget:(id)target { VCAMStealthProxy *proxy = [VCAMStealthProxy alloc]; proxy.target = target; return proxy; }
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [(NSObject *)self.target methodSignatureForSelector:sel]; }
 - (void)forwardInvocation:(NSInvocation *)invocation { if (self.target && [self.target respondsToSelector:invocation.selector]) { [invocation invokeWithTarget:self.target]; } }
 - (BOOL)respondsToSelector:(SEL)aSelector {
-    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) || aSelector == @selector(captureOutput:didOutputMetadataObjects:fromConnection:)) return YES;
+    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) || 
+        aSelector == @selector(captureOutput:didOutputMetadataObjects:fromConnection:) ||
+        aSelector == @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:)) return YES;
     return [self.target respondsToSelector:aSelector];
 }
 - (Class)class { return [(NSObject *)self.target class]; } - (Class)superclass { return [(NSObject *)self.target superclass]; }
+
+// 拦截普通通道
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-    @autoreleasepool { [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sampleBuffer];
+    @autoreleasepool { 
+        [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sampleBuffer];
         if ([self.target respondsToSelector:_cmd]) { [(id<AVCaptureVideoDataOutputSampleBufferDelegate>)self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection]; }
     }
 }
-// 脸部与元数据致盲
+
+// 👑 拦截 TikTok 专属 VIP 同步通道
+- (void)dataOutputSynchronizer:(AVCaptureDataOutputSynchronizer *)synchronizer didOutputSynchronizedDataCollection:(AVCaptureSynchronizedDataCollection *)synchronizedDataCollection {
+    @autoreleasepool {
+        for (AVCaptureOutput *out in synchronizer.dataOutputs) {
+            if ([out isKindOfClass:NSClassFromString(@"AVCaptureVideoDataOutput")]) { 
+                AVCaptureSynchronizedData *syncData = [synchronizedDataCollection synchronizedDataForCaptureOutput:out];
+                if ([syncData respondsToSelector:@selector(sampleBuffer)]) { 
+                    CMSampleBufferRef sbuf = ((CMSampleBufferRef (*)(id, SEL))objc_msgSend)(syncData, @selector(sampleBuffer)); 
+                    if (sbuf) [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sbuf];
+                } 
+            } 
+        }
+        if ([self.target respondsToSelector:_cmd]) { [(id<AVCaptureDataOutputSynchronizerDelegate>)self.target dataOutputSynchronizer:synchronizer didOutputSynchronizedDataCollection:synchronizedDataCollection]; }
+    }
+}
+
+// 拦截元数据通道 (防致盲)
 - (void)captureOutput:(AVCaptureOutput *)output didOutputMetadataObjects:(NSArray<AVMetadataObject *> *)metadataObjects fromConnection:(AVCaptureConnection *)connection {
     @autoreleasepool {
         if ([VCAMParasiteCore sharedCore].isEnabled) {
@@ -282,7 +302,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 }
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info {
     NSURL *url = info[UIImagePickerControllerMediaURL];
-    UIViewController *root = picker.presentingViewController; // 👑 提前捕获根控制器用于错误弹窗
+    UIViewController *root = picker.presentingViewController; 
     [picker dismissViewControllerAnimated:YES completion:^{
         if (url) {
             UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid]; [fb impactOccurred];
@@ -293,7 +313,6 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
                         UIImpactFeedbackGenerator *fb2 = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy]; [fb2 impactOccurred];
                     });
                 } else {
-                    // 👑 修复盲区：导入失败后的 UI 警告反馈
                     UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"该视频编码不兼容或已损坏，请使用标准的 MP4 格式视频重试。" preferredStyle:UIAlertControllerStyleAlert];
                     [err addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                     [root presentViewController:err animated:YES completion:nil];
@@ -325,7 +344,6 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
         objc_setAssociatedObject(self, "_vcam_ges", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
-// 🌟 双管齐下拦截生命周期，三指手势 100% 挂载
 - (void)vcam_becomeKeyWindow { [self vcam_becomeKeyWindow]; [self vcam_setupGestures]; }
 - (void)vcam_makeKeyAndVisible { [self vcam_makeKeyAndVisible]; [self vcam_setupGestures]; }
 - (void)vcam_handleTap:(UITapGestureRecognizer *)g {
@@ -400,6 +418,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     } else { [self vcam_setSampleBufferDelegate:delegate queue:queue]; }
 }
 @end
+
 @implementation AVCaptureMetadataOutput (VCAMStealthHook)
 - (void)vcam_setMetadataObjectsDelegate:(id<AVCaptureMetadataOutputObjectsDelegate>)delegate queue:(dispatch_queue_t)queue {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMStealthProxy")]) {
@@ -407,6 +426,20 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
         objc_setAssociatedObject(self, "_vcam_meta_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [self vcam_setMetadataObjectsDelegate:proxy queue:queue];
     } else { [self vcam_setMetadataObjectsDelegate:delegate queue:queue]; }
+}
+@end
+
+// 🌟 终极防御 3：TikTok 专属多通道同步器拦截
+@interface AVCaptureDataOutputSynchronizer (VCAMStealthHook)
+- (void)vcam_setDelegate:(id<AVCaptureDataOutputSynchronizerDelegate>)delegate queue:(dispatch_queue_t)queue;
+@end
+@implementation AVCaptureDataOutputSynchronizer (VCAMStealthHook)
+- (void)vcam_setDelegate:(id<AVCaptureDataOutputSynchronizerDelegate>)delegate queue:(dispatch_queue_t)queue {
+    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMStealthProxy")]) {
+        VCAMStealthProxy *proxy = [VCAMStealthProxy proxyWithTarget:delegate];
+        objc_setAssociatedObject(self, "_vcam_sync_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [self vcam_setDelegate:proxy queue:queue];
+    } else { [self vcam_setDelegate:delegate queue:queue]; }
 }
 @end
 
@@ -448,6 +481,10 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
     
     Class metaClass = NSClassFromString(@"AVCaptureMetadataOutput");
     if (metaClass) safe_swizzle(metaClass, @selector(setMetadataObjectsDelegate:queue:), @selector(vcam_setMetadataObjectsDelegate:queue:));
+    
+    // 🌟 激活同步器拦截钩子 (VIP 通道阻断)
+    Class syncClass = NSClassFromString(@"AVCaptureDataOutputSynchronizer");
+    if (syncClass) safe_swizzle(syncClass, @selector(setDelegate:queue:), @selector(vcam_setDelegate:queue:));
 }
 @end
 #pragma clang diagnostic pop
