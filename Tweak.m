@@ -203,7 +203,7 @@ static NSArray* cleanAndSpoofMetadataArray(NSArray *origArray) {
 // ============================================================================
 // 【4. 隐形环境伪装代理 (👑 拦截 TikTok 全系 AR 与原生通道)】
 // ============================================================================
-@interface VCAMStealthProxy : NSProxy
+@interface VCAMStealthProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureMetadataOutputObjectsDelegate, AVCaptureDataOutputSynchronizerDelegate>
 @property (nonatomic, weak) id target;
 @end
 @implementation VCAMStealthProxy
