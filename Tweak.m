@@ -12,7 +12,7 @@
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 // ============================================================================
-// 【1. 无痕转码引擎】
+// 【1. 无痕转码引擎 (伪装成系统缓存文件)】
 // ============================================================================
 @interface VCAMStealthPreprocessor : NSObject
 + (void)processVideoAtURL:(NSURL *)sourceURL completion:(void(^)(BOOL success))completion;
@@ -42,7 +42,7 @@
 @end
 
 // ============================================================================
-// 【2. 寄生级渲染引擎 (微信 NV12 破锁 + 帧率节流)】
+// 【2. 寄生级渲染引擎 (零拷贝、防卡顿异步加载 + 动态帧率自适应节流阀)】
 // ============================================================================
 @interface VCAMParasiteCore : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -51,7 +51,11 @@
 @property (nonatomic, strong) NSLock *readLock;
 @property (nonatomic, assign) CVPixelBufferRef lastPixelBuffer;
 @property (nonatomic, assign) BOOL isEnabled;
-@property (nonatomic, assign) NSTimeInterval lastFrameTime; // 帧率节流阀
+
+// 👑 帧率节流阀属性
+@property (nonatomic, assign) NSTimeInterval lastFrameTime;
+@property (nonatomic, assign) NSTimeInterval videoFrameDuration; // 🌟 新增：动态帧间隔
+
 + (instancetype)sharedCore;
 - (void)loadVideo;
 - (void)parasiteInjectSampleBuffer:(CMSampleBufferRef)sampleBuffer;
@@ -73,6 +77,7 @@
         _lastPixelBuffer = NULL;
         _isEnabled = YES; 
         _lastFrameTime = 0.0;
+        _videoFrameDuration = 1.0 / 30.0; // 默认 30 帧兜底
         
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_transferSession);
         if (_transferSession) {
@@ -108,6 +113,11 @@
             AVAssetTrack *videoTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
             
             if (videoTrack && self.assetReader) {
+                // 🌟 终极优化一：动态读取真实帧率，完美自适应 60 帧或 24 帧视频
+                float fps = videoTrack.nominalFrameRate;
+                if (fps <= 0.0) fps = 30.0; // 异常处理，兜底 30 帧
+                self.videoFrameDuration = 1.0 / fps;
+                
                 NSDictionary *settings = @{
                     (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
                     (id)kCVPixelBufferIOSurfacePropertiesKey: @{}
@@ -148,10 +158,10 @@
         [self loadVideo]; 
     }
     
-    // 👑 帧率节流阀（保证微信视频匀速播放，不快进）
+    // 👑 动态帧率节流阀：严格按照原视频的帧率匀速播放，杜绝时空撕裂
     NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
-    if (currentTime - self.lastFrameTime < (1.0 / 30.0)) {
-        return NULL;
+    if (currentTime - self.lastFrameTime < self.videoFrameDuration) {
+        return NULL; // 时间未到，拒绝抽取新帧
     }
     
     if (self.assetReader.status == AVAssetReaderStatusReading) {
@@ -160,6 +170,8 @@
             CVPixelBufferRef pix = CMSampleBufferGetImageBuffer(sbuf);
             if (pix) CVPixelBufferRetain(pix);
             CFRelease(sbuf);
+            
+            // 记录成功抽帧的时间
             self.lastFrameTime = currentTime;
             return pix;
         } else {
@@ -169,7 +181,6 @@
     return NULL;
 }
 
-// 👑 微信/全局兼容注入补丁
 - (void)parasiteInjectSampleBuffer:(CMSampleBufferRef)sampleBuffer {
     if (!self.isEnabled) return;
     
@@ -187,8 +198,7 @@
     if (srcPix) {
         CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (dstPix && self.transferSession) {
-            
-            // 👑 核心：强行获取微信 NV12 内存锁，防止黑屏或失效
+            // 微信/TikTok 兼容强力写锁
             CVReturn lockStatus = CVPixelBufferLockBaseAddress(dstPix, 0);
             if (lockStatus == kCVReturnSuccess) {
                 VTPixelTransferSessionTransferImage(self.transferSession, srcPix, dstPix);
@@ -240,7 +250,7 @@
 @end
 
 // ============================================================================
-// 【3.5 元数据致盲代理 (阻断人脸检测穿帮)】
+// 【3.5 元数据致盲代理 (阻断原生人脸与画面撕裂)】
 // ============================================================================
 @interface VCAMMetadataProxy : NSProxy <AVCaptureMetadataOutputObjectsDelegate>
 @property (nonatomic, weak) id target;
@@ -282,7 +292,7 @@
 @end
 
 // ============================================================================
-// 【4. 隐身控制台】
+// 【4. 隐身控制台 (无痕操作)】
 // ============================================================================
 @interface VCAMStealthUIManager : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 + (instancetype)sharedManager;
@@ -348,7 +358,7 @@
 @end
 
 // ============================================================================
-// 【5. 绝对安全的 Hook 注入】
+// 【5. 绝对安全的 Hook 注入 & 强制手势穿透】
 // ============================================================================
 static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) {
     if (!cls) return;
@@ -360,12 +370,34 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     else { method_exchangeImplementations(originalMethod, swizzledMethod); }
 }
 
+@interface VCAMGestureDelegate : NSObject <UIGestureRecognizerDelegate>
++ (instancetype)sharedDelegate;
+@end
+
+@implementation VCAMGestureDelegate
++ (instancetype)sharedDelegate {
+    static VCAMGestureDelegate *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ instance = [[VCAMGestureDelegate alloc] init]; });
+    return instance;
+}
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
+@end
+
 @implementation UIWindow (VCAMStealthHook)
 - (void)vcam_becomeKeyWindow {
     [self vcam_becomeKeyWindow];
     if (!objc_getAssociatedObject(self, "_vcam_ges")) {
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(vcam_handleTap:)];
-        tap.numberOfTouchesRequired = 3; tap.numberOfTapsRequired = 1;
+        tap.numberOfTouchesRequired = 3; 
+        tap.numberOfTapsRequired = 1;
+        
+        tap.cancelsTouchesInView = NO; 
+        tap.delaysTouchesBegan = NO;   
+        tap.delegate = [VCAMGestureDelegate sharedDelegate]; 
+        
         [self addGestureRecognizer:tap];
         objc_setAssociatedObject(self, "_vcam_ges", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
