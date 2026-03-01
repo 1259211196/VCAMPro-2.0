@@ -11,7 +11,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = AVMediaSupport
 
 AVMediaSupport_FILES = Tweak.xm
-AVMediaSupport_FRAMEWORKS = UIKit AVFoundation CoreMedia
+AVMediaSupport_FRAMEWORKS = UIKit AVFoundation CoreMedia VideoToolbox
 # 开启 ARC 内存管理
 AVMediaSupport_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 
