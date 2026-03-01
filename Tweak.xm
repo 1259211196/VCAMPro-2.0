@@ -201,7 +201,8 @@ static UIViewController *topMostController() {
     BOOL usedMalloc = NO;
     
     if (count > 1) {
-        pInfo = malloc(sizeof(CMSampleTimingInfo) * count);
+        // 增加 (CMSampleTimingInfo *) 强制类型转换
+        pInfo = (CMSampleTimingInfo *)malloc(sizeof(CMSampleTimingInfo) * count);
         usedMalloc = YES;
     }
     
