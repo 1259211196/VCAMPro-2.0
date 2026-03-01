@@ -7,11 +7,12 @@ THEOS_PACKAGE_SCHEME = rootless
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = VCAMTroll
+# 【修改点】：把名字改回您的脚本期望的 AVMediaSupport
+TWEAK_NAME = AVMediaSupport
 
-VCAMTroll_FILES = Tweak.xm
-VCAMTroll_FRAMEWORKS = UIKit AVFoundation CoreMedia
+AVMediaSupport_FILES = Tweak.xm
+AVMediaSupport_FRAMEWORKS = UIKit AVFoundation CoreMedia
 # 开启 ARC 内存管理
-VCAMTroll_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
+AVMediaSupport_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 
 include $(THEOS_MAKE_PATH)/tweak.mk
