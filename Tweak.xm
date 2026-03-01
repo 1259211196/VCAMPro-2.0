@@ -28,7 +28,7 @@ static UIViewController *topMostController() {
 
 
 // =====================================================================
-// 模块 1：异步帧读取引擎 (Ring Buffer)
+// 模块 1：异步帧读取引擎 (Ring Buffer & GPU IOSurface)
 // =====================================================================
 @interface VCAMFrameEngine : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -97,12 +97,10 @@ static UIViewController *topMostController() {
         if (!error) {
             AVAssetTrack *videoTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
             if (videoTrack) {
-                // 【核心优化 1 & GPU 修复】：强制输出标准尺寸与 IOSurface 对齐
+                // 确保输出包含 GPU 可读的 IOSurface
                 NSDictionary *outputSettings = @{
                     (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-                    (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
-                    (id)kCVPixelBufferWidthKey: @(1080),  // 强制重采样为 1080 宽度
-                    (id)kCVPixelBufferHeightKey: @(1920)  // 强制重采样为 1920 高度
+                    (id)kCVPixelBufferIOSurfacePropertiesKey: @{} 
                 };
                 self.trackOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack outputSettings:outputSettings];
                 
@@ -160,18 +158,25 @@ static UIViewController *topMostController() {
 
 
 // =====================================================================
-// 模块 2：Delegate Proxy (深度洗稿、时钟同步与色彩伪装)
+// 模块 2：Delegate Proxy (底层生命周期管理与时钟同步)
 // =====================================================================
 @interface VCAMDelegateProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
-@property (nonatomic, strong) id originalDelegate; 
+// 【关键修复】：这里使用 weak 防止宿主应用的 ViewController 被循环引用导致内存泄漏崩溃
+@property (nonatomic, weak) id originalDelegate; 
 @end
 
 @implementation VCAMDelegateProxy
+
 - (BOOL)respondsToSelector:(SEL)aSelector {
     return [self.originalDelegate respondsToSelector:aSelector] || [super respondsToSelector:aSelector];
 }
+
 - (id)forwardingTargetForSelector:(SEL)aSelector {
     return self.originalDelegate;
+}
+
+- (BOOL)conformsToProtocol:(Protocol *)aProtocol {
+    return [self.originalDelegate conformsToProtocol:aProtocol] || [super conformsToProtocol:aProtocol];
 }
 
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)realSampleBuffer fromConnection:(AVCaptureConnection *)connection {
@@ -179,15 +184,14 @@ static UIViewController *topMostController() {
     CMSampleBufferRef virtualBuffer = [[VCAMFrameEngine sharedEngine] consumeNextFrame];
     
     if (virtualBuffer) {
-        // 调用我们全新的超级洗稿算法
-        CMSampleBufferRef ultimateBuffer = [self createUltimateCleanSampleBufferFrom:virtualBuffer basedOn:realSampleBuffer];
+        CMSampleBufferRef adjustedBuffer = [self applyPhysicalJitterToBuffer:virtualBuffer basedOn:realSampleBuffer];
         
         if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
-            [self.originalDelegate captureOutput:output didOutputSampleBuffer:ultimateBuffer fromConnection:connection];
+            [self.originalDelegate captureOutput:output didOutputSampleBuffer:adjustedBuffer fromConnection:connection];
         }
         
         CFRelease(virtualBuffer);
-        if (ultimateBuffer) CFRelease(ultimateBuffer);
+        if (adjustedBuffer) CFRelease(adjustedBuffer);
     } else {
         if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
             [self.originalDelegate captureOutput:output didOutputSampleBuffer:realSampleBuffer fromConnection:connection];
@@ -195,55 +199,51 @@ static UIViewController *topMostController() {
     }
 }
 
-// 【核心优化 2,3,4,5】：终极硬件级伪装算法
-- (CMSampleBufferRef)createUltimateCleanSampleBufferFrom:(CMSampleBufferRef)videoSample basedOn:(CMSampleBufferRef)realSample {
+// 物理时钟完美对齐算法，保障音画同步与硬件防封
+- (CMSampleBufferRef)applyPhysicalJitterToBuffer:(CMSampleBufferRef)videoSample basedOn:(CMSampleBufferRef)realSample {
+    CMItemCount count;
+    CMSampleBufferGetSampleTimingInfoArray(videoSample, 0, nil, &count);
     
-    // 1. 获取裸像素内存 (剥离文件级元数据)
-    CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(videoSample);
-    if (!pixelBuffer) return NULL;
-    
-    // 2. 强行重置色彩空间为标准物理摄像头 SDR (Rec.709)
-    CVBufferRemoveAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey);
-    CVBufferRemoveAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey);
-    CVBufferRemoveAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey);
-    
-    CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
-    CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
-    CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+    if (count == 0) return NULL;
 
-    // 3. 提取真实摄像头的时钟信号，确保音频 100% 同步且帧率绝对恒定 (CFR)
-    CMTime realPTS = CMSampleBufferGetPresentationTimeStamp(realSample);
-    CMTime realDuration = CMSampleBufferGetDuration(realSample);
+    CMSampleTimingInfo stackInfo;
+    CMSampleTimingInfo *pInfo = &stackInfo;
+    BOOL usedMalloc = NO;
     
-    // 添加物理级热噪声微秒抖动 (50-200µs)
+    if (count > 1) {
+        pInfo = (CMSampleTimingInfo *)malloc(sizeof(CMSampleTimingInfo) * count);
+        usedMalloc = YES;
+    }
+    
+    CMSampleBufferGetSampleTimingInfoArray(videoSample, count, pInfo, &count);
+    
+    CMTime realPTS = CMSampleBufferGetPresentationTimeStamp(realSample);
+    
+    // 微秒级硬件抖动模拟
     int jitterMicroseconds = (arc4random_uniform(150) + 50); 
     if (arc4random_uniform(2) == 0) jitterMicroseconds *= -1; 
     
     CMTime jitterTime = CMTimeMake(jitterMicroseconds, 1000000); 
     CMTime adjustedPTS = CMTimeAdd(realPTS, jitterTime);
     
-    CMSampleTimingInfo timingInfo;
-    timingInfo.duration = realDuration; 
-    timingInfo.presentationTimeStamp = adjustedPTS;
-    timingInfo.decodeTimeStamp = adjustedPTS;
-
-    // 4. 凭空捏造全新的 Format Description (让剪辑软件的痕迹在内存中灰飞烟灭)
-    CMVideoFormatDescriptionRef cleanFormatInfo = NULL;
-    CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &cleanFormatInfo);
-
-    // 5. 组装终极干净、时间线完美的 SampleBuffer
-    CMSampleBufferRef cleanSampleBuffer = NULL;
-    CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, true, NULL, NULL, cleanFormatInfo, &timingInfo, &cleanSampleBuffer);
+    for (int i = 0; i < count; i++) {
+        pInfo[i].decodeTimeStamp = adjustedPTS; 
+        pInfo[i].presentationTimeStamp = adjustedPTS;
+    }
     
-    if (cleanFormatInfo) CFRelease(cleanFormatInfo);
+    CMSampleBufferRef sout;
+    // 使用这种最原生的方式创建 Buffer，能 100% 完美保留 GPU IOSurface 渲染管线，绝不黑屏！
+    CMSampleBufferCreateCopyWithNewTiming(kCFAllocatorDefault, videoSample, count, pInfo, &sout);
     
-    return cleanSampleBuffer;
+    if (usedMalloc) free(pInfo);
+    
+    return sout;
 }
 @end
 
 
 // =====================================================================
-// 模块 3：UI 交互 (变更为系统相册选择器)
+// 模块 3：UI 交互 (系统相册注入)
 // =====================================================================
 @interface VCAMUIManager : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 + (instancetype)sharedManager;
@@ -263,7 +263,7 @@ static UIViewController *topMostController() {
 - (void)handleThreeFingerTap:(UITapGestureRecognizer *)sender {
     if (sender.state == UIGestureRecognizerStateRecognized) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"VCAM 引擎" message:@"请从系统相册选择实拍视频\n(系统将自动强制格式化为 1080p/CFR/SDR 以穿透风控)" preferredStyle:UIAlertControllerStyleActionSheet];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"VCAM 控制台" message:@"请从系统相册选择实拍视频" preferredStyle:UIAlertControllerStyleActionSheet];
             
             UIAlertAction *selectAction = [UIAlertAction actionWithTitle:@"打开相册选择" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
                 
@@ -317,7 +317,7 @@ static UIViewController *topMostController() {
                     SetCurrentVideoPath(destinationPath);
                     [[VCAMFrameEngine sharedEngine] reloadVideoAsset];
                     
-                    UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"注入成功" message:@"底层引擎已清洗元数据并对齐物理时钟。\n随时可开播/拍摄！" preferredStyle:UIAlertControllerStyleAlert];
+                    UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"注入成功" message:@"视频替换完毕！相机流已全面接管。" preferredStyle:UIAlertControllerStyleAlert];
                     [successAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                     [topMostController() presentViewController:successAlert animated:YES completion:nil];
                 } else {
@@ -338,13 +338,31 @@ static UIViewController *topMostController() {
 
 
 // =====================================================================
-// 模块 4：注入点
+// 模块 4：注入点 (Hook 入口与生命周期绑定)
 // =====================================================================
 %hook AVCaptureVideoDataOutput
 - (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
-    [VCAMFrameEngine sharedEngine];
+    
+    [VCAMFrameEngine sharedEngine]; // 预热引擎
+
+    if (!sampleBufferDelegate) {
+        %orig(nil, sampleBufferCallbackQueue);
+        return;
+    }
+
+    // 防止被宿主 App 多次包装造成死循环嵌套
+    if ([sampleBufferDelegate isKindOfClass:NSClassFromString(@"VCAMDelegateProxy")]) {
+        %orig(sampleBufferDelegate, sampleBufferCallbackQueue);
+        return;
+    }
+
     VCAMDelegateProxy *proxy = [[VCAMDelegateProxy alloc] init];
     proxy.originalDelegate = sampleBufferDelegate;
+
+    // 【破局核心代码】：将 proxy 的生命周期与相机的 output 对象强行绑定！
+    // 只要 AVCaptureVideoDataOutput 存活，我们的 proxy 就绝对不会被 ARC 销毁
+    objc_setAssociatedObject(self, @selector(setSampleBufferDelegate:queue:), proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
     %orig(proxy, sampleBufferCallbackQueue);
 }
 %end
