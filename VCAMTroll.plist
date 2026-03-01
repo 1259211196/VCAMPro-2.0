@@ -1,7 +1,7 @@
 {
     Filter = {
         Bundles = (
-            "net.whatsapp.WhatsApp"
+            "com.zhiliaoapp.musically"
         );
     };
 }
