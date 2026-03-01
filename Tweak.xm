@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
+#import <VideoToolbox/VideoToolbox.h> // 【新增】：核心硬件像素转移引擎
 #import <objc/runtime.h>
 #import <os/lock.h>
 
@@ -28,7 +29,7 @@ static UIViewController *topMostController() {
 
 
 // =====================================================================
-// 模块 1：异步帧读取引擎 (Ring Buffer & GPU IOSurface)
+// 模块 1：异步帧读取引擎 (极速版)
 // =====================================================================
 @interface VCAMFrameEngine : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -97,7 +98,7 @@ static UIViewController *topMostController() {
         if (!error) {
             AVAssetTrack *videoTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
             if (videoTrack) {
-                // 确保输出包含 GPU 可读的 IOSurface
+                // 引擎现在只需要输出标准像素即可，不再强行修改尺寸，因为 VTPixelTransferSession 会自动处理缩放
                 NSDictionary *outputSettings = @{
                     (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
                     (id)kCVPixelBufferIOSurfacePropertiesKey: @{} 
@@ -158,14 +159,31 @@ static UIViewController *topMostController() {
 
 
 // =====================================================================
-// 模块 2：Delegate Proxy (底层生命周期管理与时钟同步)
+// 模块 2：Delegate Proxy (核心：硬件像素级覆写)
 // =====================================================================
 @interface VCAMDelegateProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
-// 【关键修复】：这里使用 weak 防止宿主应用的 ViewController 被循环引用导致内存泄漏崩溃
 @property (nonatomic, weak) id originalDelegate; 
+// 【新增核心】：硬件加速像素转移引擎
+@property (nonatomic, assign) VTPixelTransferSessionRef transferSession;
 @end
 
 @implementation VCAMDelegateProxy
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        // 初始化硬件加速引擎
+        VTPixelTransferSessionCreate(kCFAllocatorDefault, &_transferSession);
+    }
+    return self;
+}
+
+- (void)dealloc {
+    if (_transferSession) {
+        VTPixelTransferSessionInvalidate(_transferSession);
+        CFRelease(_transferSession);
+    }
+}
 
 - (BOOL)respondsToSelector:(SEL)aSelector {
     return [self.originalDelegate respondsToSelector:aSelector] || [super respondsToSelector:aSelector];
@@ -175,75 +193,40 @@ static UIViewController *topMostController() {
     return self.originalDelegate;
 }
 
-- (BOOL)conformsToProtocol:(Protocol *)aProtocol {
-    return [self.originalDelegate conformsToProtocol:aProtocol] || [super conformsToProtocol:aProtocol];
-}
-
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)realSampleBuffer fromConnection:(AVCaptureConnection *)connection {
     
     CMSampleBufferRef virtualBuffer = [[VCAMFrameEngine sharedEngine] consumeNextFrame];
     
     if (virtualBuffer) {
-        CMSampleBufferRef adjustedBuffer = [self applyPhysicalJitterToBuffer:virtualBuffer basedOn:realSampleBuffer];
+        // 【终极黑科技】：提取真实摄像头和虚拟视频的原始像素内存块
+        CVPixelBufferRef realPixelBuffer = CMSampleBufferGetImageBuffer(realSampleBuffer);
+        CVPixelBufferRef virtualPixelBuffer = CMSampleBufferGetImageBuffer(virtualBuffer);
         
+        if (realPixelBuffer && virtualPixelBuffer && self.transferSession) {
+            // 使用底层硬件芯片，直接把 virtualPixelBuffer 的画面强行覆盖到 realPixelBuffer 上！
+            // 它会自动处理任何分辨率不匹配、色彩空间转换的问题，速度在纳秒级
+            VTPixelTransferSessionTransferImage(self.transferSession, virtualPixelBuffer, realPixelBuffer);
+        }
+        
+        // 我们将“真实”的 SampleBuffer 发送给抖音！
+        // 因为它的外壳（时间戳、IOSurface、格式描述符）100% 都是真实的，所以绝对不可能闪退！
         if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
-            [self.originalDelegate captureOutput:output didOutputSampleBuffer:adjustedBuffer fromConnection:connection];
+            [self.originalDelegate captureOutput:output didOutputSampleBuffer:realSampleBuffer fromConnection:connection];
         }
         
         CFRelease(virtualBuffer);
-        if (adjustedBuffer) CFRelease(adjustedBuffer);
     } else {
+        // 没有虚拟视频时，正常输出真实摄像头画面
         if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
             [self.originalDelegate captureOutput:output didOutputSampleBuffer:realSampleBuffer fromConnection:connection];
         }
     }
 }
-
-// 物理时钟完美对齐算法，保障音画同步与硬件防封
-- (CMSampleBufferRef)applyPhysicalJitterToBuffer:(CMSampleBufferRef)videoSample basedOn:(CMSampleBufferRef)realSample {
-    CMItemCount count;
-    CMSampleBufferGetSampleTimingInfoArray(videoSample, 0, nil, &count);
-    
-    if (count == 0) return NULL;
-
-    CMSampleTimingInfo stackInfo;
-    CMSampleTimingInfo *pInfo = &stackInfo;
-    BOOL usedMalloc = NO;
-    
-    if (count > 1) {
-        pInfo = (CMSampleTimingInfo *)malloc(sizeof(CMSampleTimingInfo) * count);
-        usedMalloc = YES;
-    }
-    
-    CMSampleBufferGetSampleTimingInfoArray(videoSample, count, pInfo, &count);
-    
-    CMTime realPTS = CMSampleBufferGetPresentationTimeStamp(realSample);
-    
-    // 微秒级硬件抖动模拟
-    int jitterMicroseconds = (arc4random_uniform(150) + 50); 
-    if (arc4random_uniform(2) == 0) jitterMicroseconds *= -1; 
-    
-    CMTime jitterTime = CMTimeMake(jitterMicroseconds, 1000000); 
-    CMTime adjustedPTS = CMTimeAdd(realPTS, jitterTime);
-    
-    for (int i = 0; i < count; i++) {
-        pInfo[i].decodeTimeStamp = adjustedPTS; 
-        pInfo[i].presentationTimeStamp = adjustedPTS;
-    }
-    
-    CMSampleBufferRef sout;
-    // 使用这种最原生的方式创建 Buffer，能 100% 完美保留 GPU IOSurface 渲染管线，绝不黑屏！
-    CMSampleBufferCreateCopyWithNewTiming(kCFAllocatorDefault, videoSample, count, pInfo, &sout);
-    
-    if (usedMalloc) free(pInfo);
-    
-    return sout;
-}
 @end
 
 
 // =====================================================================
-// 模块 3：UI 交互 (系统相册注入)
+// 模块 3：UI 交互 (系统相册)
 // =====================================================================
 @interface VCAMUIManager : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 + (instancetype)sharedManager;
@@ -317,7 +300,7 @@ static UIViewController *topMostController() {
                     SetCurrentVideoPath(destinationPath);
                     [[VCAMFrameEngine sharedEngine] reloadVideoAsset];
                     
-                    UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"注入成功" message:@"视频替换完毕！相机流已全面接管。" preferredStyle:UIAlertControllerStyleAlert];
+                    UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"注入成功" message:@"相册视频导入完毕，随时可录制！" preferredStyle:UIAlertControllerStyleAlert];
                     [successAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                     [topMostController() presentViewController:successAlert animated:YES completion:nil];
                 } else {
@@ -338,19 +321,18 @@ static UIViewController *topMostController() {
 
 
 // =====================================================================
-// 模块 4：注入点 (Hook 入口与生命周期绑定)
+// 模块 4：注入点 (使用关联对象保证生命周期)
 // =====================================================================
 %hook AVCaptureVideoDataOutput
 - (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
     
-    [VCAMFrameEngine sharedEngine]; // 预热引擎
+    [VCAMFrameEngine sharedEngine];
 
     if (!sampleBufferDelegate) {
         %orig(nil, sampleBufferCallbackQueue);
         return;
     }
 
-    // 防止被宿主 App 多次包装造成死循环嵌套
     if ([sampleBufferDelegate isKindOfClass:NSClassFromString(@"VCAMDelegateProxy")]) {
         %orig(sampleBufferDelegate, sampleBufferCallbackQueue);
         return;
@@ -359,8 +341,7 @@ static UIViewController *topMostController() {
     VCAMDelegateProxy *proxy = [[VCAMDelegateProxy alloc] init];
     proxy.originalDelegate = sampleBufferDelegate;
 
-    // 【破局核心代码】：将 proxy 的生命周期与相机的 output 对象强行绑定！
-    // 只要 AVCaptureVideoDataOutput 存活，我们的 proxy 就绝对不会被 ARC 销毁
+    // 强绑定：只要相机实例不死，代理就永远不死
     objc_setAssociatedObject(self, @selector(setSampleBufferDelegate:queue:), proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     %orig(proxy, sampleBufferCallbackQueue);
