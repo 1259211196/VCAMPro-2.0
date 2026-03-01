@@ -1,9 +1,9 @@
-Package: com.vcam.whatsapp.pro
-Name: AVMediaSupport_WhatsApp
+Package: com.yourname.vcamtroll
+Name: VCAMTroll
 Depends: mobilesubstrate
-Version: 7.0.1
+Version: 1.0.0
 Architecture: iphoneos-arm64 iphoneos-arm64e
-Description: VCAM Ultimate Engine Optimized for WhatsApp WebRTC.
-Maintainer: Developer
-Author: Developer
+Description: High-performance Virtual Camera injection for TikTok (TrollStore optimized).
+Maintainer: Your Name <your.email@example.com>
+Author: Your Name
 Section: Tweaks
