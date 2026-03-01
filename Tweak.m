@@ -55,7 +55,7 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 @end
 
 // ============================================================================
-// 【2. 寄生级渲染引擎 (👑 恢复 32BGRA，依靠硬件转换器自动适配 WebRTC)】
+// 【2. 寄生级渲染引擎 (👑 核心：偷天换日克隆引擎)】
 // ============================================================================
 @interface VCAMParasiteCore : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -68,7 +68,7 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 @property (nonatomic, assign) NSTimeInterval videoFrameDuration;
 + (instancetype)sharedCore;
 - (void)loadVideo;
-- (void)parasiteInjectSampleBuffer:(CMSampleBufferRef)sampleBuffer;
+- (CMSampleBufferRef)createInjectedSampleBufferFrom:(CMSampleBufferRef)originalBuffer;
 @end
 
 @implementation VCAMParasiteCore
@@ -89,7 +89,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
         
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_transferSession);
         if (_transferSession) {
-            // 完美无缝缩放，保证转移到不同格式内存时不会花屏
             VTSessionSetProperty(_transferSession, kVTPixelTransferPropertyKey_ScalingMode, kVTScalingMode_CropSourceToCleanAperture);
         }
         [self loadVideo];
@@ -106,12 +105,10 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     
     [asset loadValuesAsynchronouslyForKeys:@[@"tracks"] completionHandler:^{
         NSError *error = nil;
-        AVKeyValueStatus status = [asset statusOfValueForKey:@"tracks" error:&error];
-        if (status != AVKeyValueStatusLoaded) return;
+        if ([asset statusOfValueForKey:@"tracks" error:&error] != AVKeyValueStatusLoaded) return;
         
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             [self.readLock lock];
-            
             if (self.assetReader) {
                 [self.assetReader cancelReading]; self.assetReader = nil; self.trackOutput = nil;
             }
@@ -124,7 +121,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
                 if (fps <= 0.0) fps = 30.0;
                 self.videoFrameDuration = 1.0 / fps;
                 
-                // 👑 必须使用 32BGRA，否则 AVVideoComposition 会交白卷导致没画面
                 NSDictionary *settings = @{
                     (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
                     (id)kCVPixelBufferIOSurfacePropertiesKey: @{}
@@ -176,38 +172,60 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     return NULL;
 }
 
-- (void)parasiteInjectSampleBuffer:(CMSampleBufferRef)sampleBuffer {
-    if (!self.isEnabled) return;
-    
+// 👑 终极杀招：绝不触碰原物理锁！动态克隆并转移！
+- (CMSampleBufferRef)createInjectedSampleBufferFrom:(CMSampleBufferRef)originalBuffer {
+    CVPixelBufferRef origPix = CMSampleBufferGetImageBuffer(originalBuffer);
+    if (!origPix) return NULL;
+
     [self.readLock lock];
     CVPixelBufferRef srcPix = [self copyNextFrame];
     [self.readLock unlock];
-    
+
     if (srcPix) {
         if (_lastPixelBuffer) CVPixelBufferRelease(_lastPixelBuffer);
         _lastPixelBuffer = CVPixelBufferRetain(srcPix);
     } else {
         if (_lastPixelBuffer) srcPix = CVPixelBufferRetain(_lastPixelBuffer);
     }
+
+    if (!srcPix) return NULL;
+
+    // 1. 抓取 WhatsApp 当前请求的物理格式（动态适配通话降级）
+    OSType origFormat = CVPixelBufferGetPixelFormatType(origPix);
+    size_t origW = CVPixelBufferGetWidth(origPix);
+    size_t origH = CVPixelBufferGetHeight(origPix);
+
+    // 2. 凭空克隆一个毫无硬件锁的全新物理缓冲池，并加上 WebRTC 编码必须的 IOSurface 属性
+    CVPixelBufferRef newPix = NULL;
+    NSDictionary *pixelAttributes = @{ (id)kCVPixelBufferIOSurfacePropertiesKey: @{} };
+    CVReturn status = CVPixelBufferCreate(kCFAllocatorDefault, origW, origH, origFormat, (__bridge CFDictionaryRef)pixelAttributes, &newPix);
     
-    if (srcPix) {
-        CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
-        if (dstPix && self.transferSession) {
-            // 硬件转移：将我们的 32BGRA 画面，安全映射到 WhatsApp 要求的任意格式（包括通话中的 NV12）
-            if (CVPixelBufferLockBaseAddress(dstPix, 0) == kCVReturnSuccess) {
-                VTPixelTransferSessionTransferImage(self.transferSession, srcPix, dstPix);
-                CVPixelBufferUnlockBaseAddress(dstPix, 0);
-            }
+    if (status == kCVReturnSuccess && newPix) {
+        // 3. 将我们的视频通过底层 GPU 无缝转移（自动变频、换色、缩放）到新缓冲池
+        if (self.transferSession) {
+            VTPixelTransferSessionTransferImage(self.transferSession, srcPix, newPix);
         }
-        CVPixelBufferRelease(srcPix);
+
+        // 4. 将新的缓冲池伪装打包成合法的原生 CMSampleBuffer
+        CMSampleBufferRef newSampleBuffer = NULL;
+        CMSampleTimingInfo timingInfo;
+        if (CMSampleBufferGetSampleTimingInfo(originalBuffer, 0, &timingInfo) == kCMBlockBufferNoErr) {
+            CMVideoFormatDescriptionRef videoInfo = NULL;
+            CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, newPix, &videoInfo);
+            CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, newPix, true, NULL, NULL, videoInfo, &timingInfo, &newSampleBuffer);
+            if (videoInfo) CFRelease(videoInfo);
+        }
+        CVPixelBufferRelease(newPix);
+        return newSampleBuffer; // 完美克隆体生成！
     }
+    return NULL;
 }
 @end
 
 // ============================================================================
-// 【3. 隐形环境伪装代理 (👑 采用苹果原生安全抹零法)】
+// 【3. 隐形环境伪装代理 (👑 绝对防崩溃拦截体系)】
 // ============================================================================
-@interface VCAMStealthProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate, AVCaptureDataOutputSynchronizerDelegate>
+@interface VCAMStealthProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate>
 @property (nonatomic, weak) id target;
 @end
 
@@ -217,59 +235,53 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     proxy.target = target;
     return proxy;
 }
-- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [(NSObject *)self.target methodSignatureForSelector:sel]; }
+
+// 强制通过 WhatsApp 的类验证探针
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [self.target methodSignatureForSelector:sel]; }
 - (void)forwardInvocation:(NSInvocation *)invocation {
     if (self.target && [self.target respondsToSelector:invocation.selector]) { [invocation invokeWithTarget:self.target]; }
 }
 - (BOOL)respondsToSelector:(SEL)aSelector {
-    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) ||
-        aSelector == @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:)) return YES;
+    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:)) return YES;
     return [self.target respondsToSelector:aSelector];
 }
+- (BOOL)conformsToProtocol:(Protocol *)aProtocol { return [self.target conformsToProtocol:aProtocol]; }
+- (BOOL)isKindOfClass:(Class)aClass { return [self.target isKindOfClass:aClass]; }
 
-- (Class)class { return [(NSObject *)self.target class]; }
-- (Class)superclass { return [(NSObject *)self.target superclass]; }
-
+// 拦截枢纽
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
     @autoreleasepool {
         if ([output isKindOfClass:NSClassFromString(@"AVCaptureVideoDataOutput")]) {
-            [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sampleBuffer];
+            if ([VCAMParasiteCore sharedCore].isEnabled) {
+                // 将克隆的完美假体交给 WhatsApp，丢弃带有读写锁的真实画面！
+                CMSampleBufferRef fakeSample = [[VCAMParasiteCore sharedCore] createInjectedSampleBufferFrom:sampleBuffer];
+                if (fakeSample) {
+                    if ([self.target respondsToSelector:_cmd]) {
+                        [(id)self.target captureOutput:output didOutputSampleBuffer:fakeSample fromConnection:connection];
+                    }
+                    CFRelease(fakeSample); // 释放内存，防内存泄漏
+                    return; // 拦截结束
+                }
+            }
         } 
         else if ([output isKindOfClass:NSClassFromString(@"AVCaptureAudioDataOutput")]) {
             if ([VCAMParasiteCore sharedCore].isEnabled) {
-                CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
-                if (blockBuffer) {
-                    // 👑 极度安全的官方抹零 API：绝不触碰指针结构，只静音数据。彻底告别视频通话挂断！
-                    CMBlockBufferFillDataBytes(0, blockBuffer, 0, CMBlockBufferGetDataLength(blockBuffer));
-                }
+                // 👑 音频极限防挂断法：幽灵丢包法
+                // 直接拦截音频帧，不发送给 WebRTC！这等同于网络音频丢包，绝对不会引发内存越界挂断，且完美实现静音。
+                return;
             }
         }
         
+        // 未开启插件时的常规放行
         if ([self.target respondsToSelector:_cmd]) {
             [(id)self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
         }
     }
 }
-
-// 拦截 WebRTC 偶尔使用的同步器流
-- (void)dataOutputSynchronizer:(AVCaptureDataOutputSynchronizer *)synchronizer didOutputSynchronizedDataCollection:(AVCaptureSynchronizedDataCollection *)synchronizedDataCollection {
-    @autoreleasepool {
-        for (AVCaptureOutput *out in synchronizer.dataOutputs) {
-            if ([out isKindOfClass:NSClassFromString(@"AVCaptureVideoDataOutput")]) { 
-                AVCaptureSynchronizedData *syncData = [synchronizedDataCollection synchronizedDataForCaptureOutput:out];
-                if ([syncData respondsToSelector:@selector(sampleBuffer)]) { 
-                    CMSampleBufferRef sbuf = ((CMSampleBufferRef (*)(id, SEL))objc_msgSend)(syncData, @selector(sampleBuffer)); 
-                    if (sbuf) [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sbuf];
-                } 
-            } 
-        }
-        if ([self.target respondsToSelector:_cmd]) { [(id)self.target dataOutputSynchronizer:synchronizer didOutputSynchronizedDataCollection:synchronizedDataCollection]; }
-    }
-}
 @end
 
 // ============================================================================
-// 【4. 隐身控制台 (UI 防死锁)】
+// 【4. 隐身控制台】
 // ============================================================================
 @interface VCAMStealthUIManager : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 + (instancetype)sharedManager;
@@ -388,19 +400,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 }
 @end
 
-@interface AVCaptureDataOutputSynchronizer (VCAMStealthHook)
-- (void)vcam_setDelegate:(id<AVCaptureDataOutputSynchronizerDelegate>)delegate queue:(dispatch_queue_t)queue;
-@end
-@implementation AVCaptureDataOutputSynchronizer (VCAMStealthHook)
-- (void)vcam_setDelegate:(id<AVCaptureDataOutputSynchronizerDelegate>)delegate queue:(dispatch_queue_t)queue {
-    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMStealthProxy")]) {
-        VCAMStealthProxy *proxy = [VCAMStealthProxy proxyWithTarget:delegate];
-        objc_setAssociatedObject(self, "_vcam_sync_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [self vcam_setDelegate:proxy queue:queue];
-    } else { [self vcam_setDelegate:delegate queue:queue]; }
-}
-@end
-
 // ============================================================================
 // 【6. 启动器】
 // ============================================================================
@@ -416,9 +415,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     
     Class adoClass = NSClassFromString(@"AVCaptureAudioDataOutput");
     if (adoClass) safe_swizzle(adoClass, @selector(setSampleBufferDelegate:queue:), @selector(vcam_setSampleBufferDelegate:queue:));
-    
-    Class syncClass = NSClassFromString(@"AVCaptureDataOutputSynchronizer");
-    if (syncClass) safe_swizzle(syncClass, @selector(setDelegate:queue:), @selector(vcam_setDelegate:queue:));
 }
 @end
 #pragma clang diagnostic pop
