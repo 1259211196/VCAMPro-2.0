@@ -158,11 +158,10 @@ static UIViewController *topMostController() {
 
 
 // =====================================================================
-// 模块 2：Delegate Proxy (CoreImage 硬件渲染覆写引擎)
+// 模块 2：Delegate Proxy (CoreImage 硬件渲染覆写引擎 - 亮度修复版)
 // =====================================================================
 @interface VCAMDelegateProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
 @property (nonatomic, weak) id originalDelegate; 
-// 【新增】：CoreImage GPU 渲染上下文
 @property (nonatomic, strong) CIContext *ciContext; 
 @end
 
@@ -171,8 +170,12 @@ static UIViewController *topMostController() {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        // 初始化基于 GPU (Metal) 的渲染上下文，禁用软解，速度极快
-        _ciContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @(NO)}];
+        // 【亮度修复 1】：添加 kCIContextWorkingColorSpace: [NSNull null]
+        // 彻底关闭 CIContext 的默认色彩管理，防止画面在处理过程中被强行压暗！
+        _ciContext = [CIContext contextWithOptions:@{
+            kCIContextUseSoftwareRenderer: @(NO),
+            kCIContextWorkingColorSpace: [NSNull null] 
+        }];
     }
     return self;
 }
@@ -194,10 +197,11 @@ static UIViewController *topMostController() {
         CVPixelBufferRef virtualPixelBuffer = CMSampleBufferGetImageBuffer(virtualBuffer);
         
         if (realPixelBuffer && virtualPixelBuffer && self.ciContext) {
-            // 1. 将我们选好的视频帧转化为 CIImage
-            CIImage *virtualImage = [CIImage imageWithCVPixelBuffer:virtualPixelBuffer];
             
-            // 2. 动态计算缩放比例 (如果视频分辨率与摄像头不一致，自动拉伸铺满，防止崩溃)
+            // 【亮度修复 2】：读取时明确忽略原有的色彩配置文件，保持原汁原味的像素亮度
+            NSDictionary *options = @{ kCIImageColorSpace: [NSNull null] };
+            CIImage *virtualImage = [CIImage imageWithCVPixelBuffer:virtualPixelBuffer options:options];
+            
             CGFloat realWidth = CVPixelBufferGetWidth(realPixelBuffer);
             CGFloat realHeight = CVPixelBufferGetHeight(realPixelBuffer);
             CGFloat virtualWidth = CVPixelBufferGetWidth(virtualPixelBuffer);
@@ -209,8 +213,7 @@ static UIViewController *topMostController() {
                 virtualImage = [virtualImage imageByApplyingTransform:CGAffineTransformMakeScale(scaleX, scaleY)];
             }
             
-            // 3. 【终极画笔】：调用 GPU 直接将画面“画”在真实摄像头的内存里！
-            // 因为使用的是真实的 Buffer 壳子，抖音的渲染管线绝对不会崩溃！
+            // 将纯净的、未被调色的像素直接铺在真实内存上
             [self.ciContext render:virtualImage toCVPixelBuffer:realPixelBuffer bounds:CGRectMake(0, 0, realWidth, realHeight) colorSpace:nil];
         }
         
