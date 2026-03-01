@@ -1,22 +1,17 @@
-# 指定编译架构，覆盖所有现代 iOS 设备 (A12~A17)
-ARCHS = arm64 arm64e
-TARGET := iphone:clang:latest:13.0
+# 目标 iOS 版本与架构
+TARGET := iphone:clang:latest:14.0
+INSTALL_TARGET_PROCESSES = TikTok
 
-# 编译安装后自动重启 WhatsApp
-INSTALL_TARGET_PROCESSES = WhatsApp
+# 指定为 rootless / TrollStore 环境编译
+THEOS_PACKAGE_SCHEME = rootless
 
 include $(THEOS)/makefiles/common.mk
 
-# 插件名称，必须与你的 .plist 文件名前缀完全一致
-TWEAK_NAME = AVMediaSupport
+TWEAK_NAME = VCAMTroll
 
-# 源码文件指向
-AVMediaSupport_FILES = Tweak.m
-
-# 编译参数：强制 ARC，并放行指针强转警告以适应底层 Hook
-AVMediaSupport_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-incompatible-pointer-types
-
-# 👑 核心依赖池：缺少任何一个都会导致连接器 (Linker) 报错
-AVMediaSupport_FRAMEWORKS = Foundation UIKit AVFoundation VideoToolbox CoreMedia CoreVideo CoreImage
+VCAMTroll_FILES = Tweak.xm
+VCAMTroll_FRAMEWORKS = UIKit AVFoundation CoreMedia
+# 开启 ARC 内存管理
+VCAMTroll_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 
 include $(THEOS_MAKE_PATH)/tweak.mk
