@@ -1,22 +1,22 @@
-# 1. 架构与目标系统设置
+# 指定编译架构，覆盖所有现代 iOS 设备 (A12~A17)
 ARCHS = arm64 arm64e
 TARGET := iphone:clang:latest:13.0
 
-# 2. 注入目标进程 (编译安装后自动重启 WhatsApp 以生效)
+# 编译安装后自动重启 WhatsApp
 INSTALL_TARGET_PROCESSES = WhatsApp
 
 include $(THEOS)/makefiles/common.mk
 
-# 3. 插件名称 (保持与你之前 GitHub Actions 中的名称一致)
+# 插件名称，必须与你的 .plist 文件名前缀完全一致
 TWEAK_NAME = AVMediaSupport
 
-# 4. 源码文件
+# 源码文件指向
 AVMediaSupport_FILES = Tweak.m
 
-# 5. 编译参数 (强制开启 ARC，并静默部分旧版 API 弃用警告，防止因为 -Werror 中断编译)
+# 编译参数：强制 ARC，并放行指针强转警告以适应底层 Hook
 AVMediaSupport_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-incompatible-pointer-types
 
-# 6. 👑 核心依赖：必须链接这些苹果底层框架，否则 GPU 和音视频引擎无法启动！
+# 👑 核心依赖池：缺少任何一个都会导致连接器 (Linker) 报错
 AVMediaSupport_FRAMEWORKS = Foundation UIKit AVFoundation VideoToolbox CoreMedia CoreVideo CoreImage
 
 include $(THEOS_MAKE_PATH)/tweak.mk
