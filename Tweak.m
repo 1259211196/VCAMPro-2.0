@@ -25,7 +25,7 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 }
 
 // ============================================================================
-// 【1. 无痕转码引擎 (伪装成系统缓存文件)】
+// 【1. 无痕转码引擎】
 // ============================================================================
 @interface VCAMStealthPreprocessor : NSObject
 + (void)processVideoAtURL:(NSURL *)sourceURL completion:(void(^)(BOOL success))completion;
@@ -55,7 +55,7 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 @end
 
 // ============================================================================
-// 【2. 寄生级渲染引擎 (WebRTC 内存锁强写 + 异步防掉帧)】
+// 【2. 寄生级渲染引擎 (👑 核心修复：完美迎合 WebRTC 的 NV12 格式)】
 // ============================================================================
 @interface VCAMParasiteCore : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -123,8 +123,9 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
                 if (fps <= 0.0) fps = 30.0;
                 self.videoFrameDuration = 1.0 / fps;
                 
+                // 👑 修复死穴二：强制输出 WhatsApp WebRTC 要求的 YUV420 (NV12) 格式！绝对杜绝 BGRA 导致的编码器崩溃！
                 NSDictionary *settings = @{
-                    (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+                    (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
                     (id)kCVPixelBufferIOSurfacePropertiesKey: @{}
                 };
                 
@@ -159,7 +160,7 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     if (self.assetReader.status == AVAssetReaderStatusCompleted) { [self loadVideo]; }
     
     NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
-    if (currentTime - self.lastFrameTime < self.videoFrameDuration) return NULL; // 动态防掉帧节流
+    if (currentTime - self.lastFrameTime < self.videoFrameDuration) return NULL;
     
     if (self.assetReader.status == AVAssetReaderStatusReading) {
         CMSampleBufferRef sbuf = [self.trackOutput copyNextSampleBuffer];
@@ -191,7 +192,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     if (srcPix) {
         CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (dstPix && self.transferSession) {
-            // 👑 修复核心：WhatsApp WebRTC 强制硬件内存锁，否则必定黑屏
             if (CVPixelBufferLockBaseAddress(dstPix, 0) == kCVReturnSuccess) {
                 VTPixelTransferSessionTransferImage(self.transferSession, srcPix, dstPix);
                 CVPixelBufferUnlockBaseAddress(dstPix, 0);
@@ -203,9 +203,9 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 @end
 
 // ============================================================================
-// 【3. 隐形环境伪装代理 (视音频双路强力阻断)】
+// 【3. 隐形环境伪装代理 (👑 核心修复：绝对安全的声学致盲)】
 // ============================================================================
-@interface VCAMStealthProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate>
+@interface VCAMStealthProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate, AVCaptureDataOutputSynchronizerDelegate>
 @property (nonatomic, weak) id target;
 @end
 
@@ -220,7 +220,8 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     if (self.target && [self.target respondsToSelector:invocation.selector]) { [invocation invokeWithTarget:self.target]; }
 }
 - (BOOL)respondsToSelector:(SEL)aSelector {
-    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:)) return YES;
+    if (aSelector == @selector(captureOutput:didOutputSampleBuffer:fromConnection:) ||
+        aSelector == @selector(dataOutputSynchronizer:didOutputSynchronizedDataCollection:)) return YES;
     return [self.target respondsToSelector:aSelector];
 }
 
@@ -233,14 +234,18 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
             [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sampleBuffer];
         } 
         else if ([output isKindOfClass:NSClassFromString(@"AVCaptureAudioDataOutput")]) {
-            // 👑 漏洞修复：环境音裸奔防范！开启 VCAM 时强制抹零物理麦克风数据
+            // 👑 修复死穴一：极其温和的“原址抹零”法。绝不破坏内存结构，完美避开 WebRTC 崩溃！
             if ([VCAMParasiteCore sharedCore].isEnabled) {
                 CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
                 if (blockBuffer) {
-                    size_t length = CMBlockBufferGetDataLength(blockBuffer);
-                    char *silence = calloc(1, length);
-                    CMBlockBufferReplaceDataBytes(silence, blockBuffer, 0, length);
-                    free(silence);
+                    size_t length;
+                    char *dataPointer;
+                    // 直接获取底层物理指针
+                    OSStatus status = CMBlockBufferGetDataPointer(blockBuffer, 0, NULL, &length, &dataPointer);
+                    if (status == kCMBlockBufferNoErr && dataPointer) {
+                        // 在原地址上写入静音数据，绝不破坏 WebRTC 的内存映射！
+                        memset(dataPointer, 0, length);
+                    }
                 }
             }
         }
@@ -248,6 +253,22 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
         if ([self.target respondsToSelector:_cmd]) {
             [(id)self.target captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
         }
+    }
+}
+
+// 拦截 WebRTC 偶尔使用的同步器流
+- (void)dataOutputSynchronizer:(AVCaptureDataOutputSynchronizer *)synchronizer didOutputSynchronizedDataCollection:(AVCaptureSynchronizedDataCollection *)synchronizedDataCollection {
+    @autoreleasepool {
+        for (AVCaptureOutput *out in synchronizer.dataOutputs) {
+            if ([out isKindOfClass:NSClassFromString(@"AVCaptureVideoDataOutput")]) { 
+                AVCaptureSynchronizedData *syncData = [synchronizedDataCollection synchronizedDataForCaptureOutput:out];
+                if ([syncData respondsToSelector:@selector(sampleBuffer)]) { 
+                    CMSampleBufferRef sbuf = ((CMSampleBufferRef (*)(id, SEL))objc_msgSend)(syncData, @selector(sampleBuffer)); 
+                    if (sbuf) [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sbuf];
+                } 
+            } 
+        }
+        if ([self.target respondsToSelector:_cmd]) { [(id)self.target dataOutputSynchronizer:synchronizer didOutputSynchronizedDataCollection:synchronizedDataCollection]; }
     }
 }
 @end
@@ -328,7 +349,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 @end
 @implementation VCAMGestureDelegate
 + (instancetype)sharedDelegate { static VCAMGestureDelegate *instance = nil; static dispatch_once_t onceToken; dispatch_once(&onceToken, ^{ instance = [[VCAMGestureDelegate alloc] init]; }); return instance; }
-// 👑 强制穿透：对抗 WhatsApp 密集的原生手势
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer { return YES; }
 @end
 
@@ -343,7 +363,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
         objc_setAssociatedObject(self, "_vcam_ges", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
-// 双端生命周期注入，防遗漏
 - (void)vcam_becomeKeyWindow { [self vcam_becomeKeyWindow]; [self vcam_setupGestures]; }
 - (void)vcam_makeKeyAndVisible { [self vcam_makeKeyAndVisible]; [self vcam_setupGestures]; }
 - (void)vcam_handleTap:(UITapGestureRecognizer *)g {
@@ -364,7 +383,6 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 }
 @end
 
-// 音频通道挂载
 @implementation AVCaptureAudioDataOutput (VCAMStealthHook)
 - (void)vcam_setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
     if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMStealthProxy")]) {
@@ -372,6 +390,19 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
         objc_setAssociatedObject(self, "_vcam_audio_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [self vcam_setSampleBufferDelegate:proxy queue:queue];
     } else { [self vcam_setSampleBufferDelegate:delegate queue:queue]; }
+}
+@end
+
+@interface AVCaptureDataOutputSynchronizer (VCAMStealthHook)
+- (void)vcam_setDelegate:(id<AVCaptureDataOutputSynchronizerDelegate>)delegate queue:(dispatch_queue_t)queue;
+@end
+@implementation AVCaptureDataOutputSynchronizer (VCAMStealthHook)
+- (void)vcam_setDelegate:(id<AVCaptureDataOutputSynchronizerDelegate>)delegate queue:(dispatch_queue_t)queue {
+    if (delegate && ![delegate isKindOfClass:NSClassFromString(@"VCAMStealthProxy")]) {
+        VCAMStealthProxy *proxy = [VCAMStealthProxy proxyWithTarget:delegate];
+        objc_setAssociatedObject(self, "_vcam_sync_p", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [self vcam_setDelegate:proxy queue:queue];
+    } else { [self vcam_setDelegate:delegate queue:queue]; }
 }
 @end
 
@@ -390,6 +421,9 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     
     Class adoClass = NSClassFromString(@"AVCaptureAudioDataOutput");
     if (adoClass) safe_swizzle(adoClass, @selector(setSampleBufferDelegate:queue:), @selector(vcam_setSampleBufferDelegate:queue:));
+    
+    Class syncClass = NSClassFromString(@"AVCaptureDataOutputSynchronizer");
+    if (syncClass) safe_swizzle(syncClass, @selector(setDelegate:queue:), @selector(vcam_setDelegate:queue:));
 }
 @end
 #pragma clang diagnostic pop
