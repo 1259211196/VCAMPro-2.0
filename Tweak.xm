@@ -1,7 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
-#import <VideoToolbox/VideoToolbox.h> // 【新增】：核心硬件像素转移引擎
+#import <CoreImage/CoreImage.h> // 【修改点】：换用向下兼容到 iOS 9 的 CoreImage
 #import <objc/runtime.h>
 #import <os/lock.h>
 
@@ -29,7 +29,7 @@ static UIViewController *topMostController() {
 
 
 // =====================================================================
-// 模块 1：异步帧读取引擎 (极速版)
+// 模块 1：异步帧读取引擎
 // =====================================================================
 @interface VCAMFrameEngine : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -98,7 +98,6 @@ static UIViewController *topMostController() {
         if (!error) {
             AVAssetTrack *videoTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
             if (videoTrack) {
-                // 引擎现在只需要输出标准像素即可，不再强行修改尺寸，因为 VTPixelTransferSession 会自动处理缩放
                 NSDictionary *outputSettings = @{
                     (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
                     (id)kCVPixelBufferIOSurfacePropertiesKey: @{} 
@@ -159,12 +158,12 @@ static UIViewController *topMostController() {
 
 
 // =====================================================================
-// 模块 2：Delegate Proxy (核心：硬件像素级覆写)
+// 模块 2：Delegate Proxy (CoreImage 硬件渲染覆写引擎)
 // =====================================================================
 @interface VCAMDelegateProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
 @property (nonatomic, weak) id originalDelegate; 
-// 【新增核心】：硬件加速像素转移引擎
-@property (nonatomic, assign) VTPixelTransferSessionRef transferSession;
+// 【新增】：CoreImage GPU 渲染上下文
+@property (nonatomic, strong) CIContext *ciContext; 
 @end
 
 @implementation VCAMDelegateProxy
@@ -172,17 +171,10 @@ static UIViewController *topMostController() {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        // 初始化硬件加速引擎
-        VTPixelTransferSessionCreate(kCFAllocatorDefault, &_transferSession);
+        // 初始化基于 GPU (Metal) 的渲染上下文，禁用软解，速度极快
+        _ciContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @(NO)}];
     }
     return self;
-}
-
-- (void)dealloc {
-    if (_transferSession) {
-        VTPixelTransferSessionInvalidate(_transferSession);
-        CFRelease(_transferSession);
-    }
 }
 
 - (BOOL)respondsToSelector:(SEL)aSelector {
@@ -198,25 +190,36 @@ static UIViewController *topMostController() {
     CMSampleBufferRef virtualBuffer = [[VCAMFrameEngine sharedEngine] consumeNextFrame];
     
     if (virtualBuffer) {
-        // 【终极黑科技】：提取真实摄像头和虚拟视频的原始像素内存块
         CVPixelBufferRef realPixelBuffer = CMSampleBufferGetImageBuffer(realSampleBuffer);
         CVPixelBufferRef virtualPixelBuffer = CMSampleBufferGetImageBuffer(virtualBuffer);
         
-        if (realPixelBuffer && virtualPixelBuffer && self.transferSession) {
-            // 使用底层硬件芯片，直接把 virtualPixelBuffer 的画面强行覆盖到 realPixelBuffer 上！
-            // 它会自动处理任何分辨率不匹配、色彩空间转换的问题，速度在纳秒级
-            VTPixelTransferSessionTransferImage(self.transferSession, virtualPixelBuffer, realPixelBuffer);
+        if (realPixelBuffer && virtualPixelBuffer && self.ciContext) {
+            // 1. 将我们选好的视频帧转化为 CIImage
+            CIImage *virtualImage = [CIImage imageWithCVPixelBuffer:virtualPixelBuffer];
+            
+            // 2. 动态计算缩放比例 (如果视频分辨率与摄像头不一致，自动拉伸铺满，防止崩溃)
+            CGFloat realWidth = CVPixelBufferGetWidth(realPixelBuffer);
+            CGFloat realHeight = CVPixelBufferGetHeight(realPixelBuffer);
+            CGFloat virtualWidth = CVPixelBufferGetWidth(virtualPixelBuffer);
+            CGFloat virtualHeight = CVPixelBufferGetHeight(virtualPixelBuffer);
+            
+            if (realWidth != virtualWidth || realHeight != virtualHeight) {
+                CGFloat scaleX = realWidth / virtualWidth;
+                CGFloat scaleY = realHeight / virtualHeight;
+                virtualImage = [virtualImage imageByApplyingTransform:CGAffineTransformMakeScale(scaleX, scaleY)];
+            }
+            
+            // 3. 【终极画笔】：调用 GPU 直接将画面“画”在真实摄像头的内存里！
+            // 因为使用的是真实的 Buffer 壳子，抖音的渲染管线绝对不会崩溃！
+            [self.ciContext render:virtualImage toCVPixelBuffer:realPixelBuffer bounds:CGRectMake(0, 0, realWidth, realHeight) colorSpace:nil];
         }
         
-        // 我们将“真实”的 SampleBuffer 发送给抖音！
-        // 因为它的外壳（时间戳、IOSurface、格式描述符）100% 都是真实的，所以绝对不可能闪退！
         if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
             [self.originalDelegate captureOutput:output didOutputSampleBuffer:realSampleBuffer fromConnection:connection];
         }
         
         CFRelease(virtualBuffer);
     } else {
-        // 没有虚拟视频时，正常输出真实摄像头画面
         if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
             [self.originalDelegate captureOutput:output didOutputSampleBuffer:realSampleBuffer fromConnection:connection];
         }
@@ -341,7 +344,6 @@ static UIViewController *topMostController() {
     VCAMDelegateProxy *proxy = [[VCAMDelegateProxy alloc] init];
     proxy.originalDelegate = sampleBufferDelegate;
 
-    // 强绑定：只要相机实例不死，代理就永远不死
     objc_setAssociatedObject(self, @selector(setSampleBufferDelegate:queue:), proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     %orig(proxy, sampleBufferCallbackQueue);
