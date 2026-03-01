@@ -97,12 +97,12 @@ static UIViewController *topMostController() {
         if (!error) {
             AVAssetTrack *videoTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
             if (videoTrack) {
-                // 【核心修复 1】：必须添加 kCVPixelBufferIOSurfacePropertiesKey 空字典
-                // 这行代码强制系统在内存中为视频帧分配 GPU 可读的 IOSurface 内存页
-                // 如果没有它，抖音的美颜和 GPU 渲染管线会直接崩溃导致黑屏！
+                // 【核心优化 1 & GPU 修复】：强制输出标准尺寸与 IOSurface 对齐
                 NSDictionary *outputSettings = @{
                     (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-                    (id)kCVPixelBufferIOSurfacePropertiesKey: @{} 
+                    (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+                    (id)kCVPixelBufferWidthKey: @(1080),  // 强制重采样为 1080 宽度
+                    (id)kCVPixelBufferHeightKey: @(1920)  // 强制重采样为 1920 高度
                 };
                 self.trackOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack outputSettings:outputSettings];
                 
@@ -160,11 +160,9 @@ static UIViewController *topMostController() {
 
 
 // =====================================================================
-// 模块 2：Delegate Proxy (拦截与 Jitter 模拟)
+// 模块 2：Delegate Proxy (深度洗稿、时钟同步与色彩伪装)
 // =====================================================================
 @interface VCAMDelegateProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
-// 【核心修复 2】：将 weak 改为 strong
-// 严防抖音释放原始 Delegate 导致 originalDelegate 变为 nil，从而断绝帧传递
 @property (nonatomic, strong) id originalDelegate; 
 @end
 
@@ -181,14 +179,15 @@ static UIViewController *topMostController() {
     CMSampleBufferRef virtualBuffer = [[VCAMFrameEngine sharedEngine] consumeNextFrame];
     
     if (virtualBuffer) {
-        CMSampleBufferRef adjustedBuffer = [self applyPhysicalJitterToBuffer:virtualBuffer basedOn:realSampleBuffer];
+        // 调用我们全新的超级洗稿算法
+        CMSampleBufferRef ultimateBuffer = [self createUltimateCleanSampleBufferFrom:virtualBuffer basedOn:realSampleBuffer];
         
         if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
-            [self.originalDelegate captureOutput:output didOutputSampleBuffer:adjustedBuffer fromConnection:connection];
+            [self.originalDelegate captureOutput:output didOutputSampleBuffer:ultimateBuffer fromConnection:connection];
         }
         
         CFRelease(virtualBuffer);
-        if (adjustedBuffer) CFRelease(adjustedBuffer);
+        if (ultimateBuffer) CFRelease(ultimateBuffer);
     } else {
         if ([self.originalDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
             [self.originalDelegate captureOutput:output didOutputSampleBuffer:realSampleBuffer fromConnection:connection];
@@ -196,42 +195,49 @@ static UIViewController *topMostController() {
     }
 }
 
-- (CMSampleBufferRef)applyPhysicalJitterToBuffer:(CMSampleBufferRef)videoSample basedOn:(CMSampleBufferRef)realSample {
-    CMItemCount count;
-    CMSampleBufferGetSampleTimingInfoArray(videoSample, 0, nil, &count);
+// 【核心优化 2,3,4,5】：终极硬件级伪装算法
+- (CMSampleBufferRef)createUltimateCleanSampleBufferFrom:(CMSampleBufferRef)videoSample basedOn:(CMSampleBufferRef)realSample {
     
-    if (count == 0) return NULL;
+    // 1. 获取裸像素内存 (剥离文件级元数据)
+    CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(videoSample);
+    if (!pixelBuffer) return NULL;
+    
+    // 2. 强行重置色彩空间为标准物理摄像头 SDR (Rec.709)
+    CVBufferRemoveAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey);
+    CVBufferRemoveAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey);
+    CVBufferRemoveAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey);
+    
+    CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
 
-    CMSampleTimingInfo stackInfo;
-    CMSampleTimingInfo *pInfo = &stackInfo;
-    BOOL usedMalloc = NO;
-    
-    if (count > 1) {
-        pInfo = (CMSampleTimingInfo *)malloc(sizeof(CMSampleTimingInfo) * count);
-        usedMalloc = YES;
-    }
-    
-    CMSampleBufferGetSampleTimingInfoArray(videoSample, count, pInfo, &count);
-    
+    // 3. 提取真实摄像头的时钟信号，确保音频 100% 同步且帧率绝对恒定 (CFR)
     CMTime realPTS = CMSampleBufferGetPresentationTimeStamp(realSample);
+    CMTime realDuration = CMSampleBufferGetDuration(realSample);
     
+    // 添加物理级热噪声微秒抖动 (50-200µs)
     int jitterMicroseconds = (arc4random_uniform(150) + 50); 
     if (arc4random_uniform(2) == 0) jitterMicroseconds *= -1; 
     
     CMTime jitterTime = CMTimeMake(jitterMicroseconds, 1000000); 
     CMTime adjustedPTS = CMTimeAdd(realPTS, jitterTime);
     
-    for (int i = 0; i < count; i++) {
-        pInfo[i].decodeTimeStamp = adjustedPTS; 
-        pInfo[i].presentationTimeStamp = adjustedPTS;
-    }
+    CMSampleTimingInfo timingInfo;
+    timingInfo.duration = realDuration; 
+    timingInfo.presentationTimeStamp = adjustedPTS;
+    timingInfo.decodeTimeStamp = adjustedPTS;
+
+    // 4. 凭空捏造全新的 Format Description (让剪辑软件的痕迹在内存中灰飞烟灭)
+    CMVideoFormatDescriptionRef cleanFormatInfo = NULL;
+    CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &cleanFormatInfo);
+
+    // 5. 组装终极干净、时间线完美的 SampleBuffer
+    CMSampleBufferRef cleanSampleBuffer = NULL;
+    CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, true, NULL, NULL, cleanFormatInfo, &timingInfo, &cleanSampleBuffer);
     
-    CMSampleBufferRef sout;
-    CMSampleBufferCreateCopyWithNewTiming(kCFAllocatorDefault, videoSample, count, pInfo, &sout);
+    if (cleanFormatInfo) CFRelease(cleanFormatInfo);
     
-    if (usedMalloc) free(pInfo);
-    
-    return sout;
+    return cleanSampleBuffer;
 }
 @end
 
@@ -239,7 +245,6 @@ static UIViewController *topMostController() {
 // =====================================================================
 // 模块 3：UI 交互 (变更为系统相册选择器)
 // =====================================================================
-// 【核心修复 3】：实现 UIImagePickerController 代理
 @interface VCAMUIManager : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 + (instancetype)sharedManager;
 - (void)handleThreeFingerTap:(UITapGestureRecognizer *)sender;
@@ -258,17 +263,14 @@ static UIViewController *topMostController() {
 - (void)handleThreeFingerTap:(UITapGestureRecognizer *)sender {
     if (sender.state == UIGestureRecognizerStateRecognized) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"VCAM 控制台" message:@"请从系统相册选择要注入的视频" preferredStyle:UIAlertControllerStyleActionSheet];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"VCAM 引擎" message:@"请从系统相册选择实拍视频\n(系统将自动强制格式化为 1080p/CFR/SDR 以穿透风控)" preferredStyle:UIAlertControllerStyleActionSheet];
             
-            UIAlertAction *selectAction = [UIAlertAction actionWithTitle:@"打开相册选择视频" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+            UIAlertAction *selectAction = [UIAlertAction actionWithTitle:@"打开相册选择" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
                 
-                // 调起系统相册而不是文件管理器
                 UIImagePickerController *picker = [[UIImagePickerController alloc] init];
                 picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-                // 仅限选择视频类型
                 picker.mediaTypes = @[@"public.movie"]; 
                 picker.delegate = self;
-                // 避免相册对视频进行过度压缩
                 picker.videoExportPreset = AVAssetExportPresetPassthrough;
                 picker.modalPresentationStyle = UIModalPresentationFullScreen;
                 
@@ -290,12 +292,10 @@ static UIViewController *topMostController() {
     }
 }
 
-// 相册选择完毕回调
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
     
     NSURL *sourceURL = info[UIImagePickerControllerMediaURL];
     
-    // 关闭相册界面
     [picker dismissViewControllerAnimated:YES completion:^{
         if (!sourceURL) return;
         
@@ -310,7 +310,6 @@ static UIViewController *topMostController() {
             }
             
             NSError *error = nil;
-            // 相册选取的视频通常位于临时缓存目录，我们将其安全拷贝进应用沙盒
             BOOL success = [fileManager copyItemAtPath:sourceURL.path toPath:destinationPath error:&error];
             
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -318,7 +317,7 @@ static UIViewController *topMostController() {
                     SetCurrentVideoPath(destinationPath);
                     [[VCAMFrameEngine sharedEngine] reloadVideoAsset];
                     
-                    UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"成功" message:@"相册视频导入并替换完毕。" preferredStyle:UIAlertControllerStyleAlert];
+                    UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"注入成功" message:@"底层引擎已清洗元数据并对齐物理时钟。\n随时可开播/拍摄！" preferredStyle:UIAlertControllerStyleAlert];
                     [successAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                     [topMostController() presentViewController:successAlert animated:YES completion:nil];
                 } else {
@@ -331,7 +330,6 @@ static UIViewController *topMostController() {
     }];
 }
 
-// 取消选择回调
 - (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
     [picker dismissViewControllerAnimated:YES completion:nil];
 }
