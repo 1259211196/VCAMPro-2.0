@@ -55,7 +55,7 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 @end
 
 // ============================================================================
-// 【2. 寄生级渲染引擎 (👑 核心修复：完美迎合 WebRTC 的 NV12 格式)】
+// 【2. 寄生级渲染引擎 (👑 恢复 32BGRA，依靠硬件转换器自动适配 WebRTC)】
 // ============================================================================
 @interface VCAMParasiteCore : NSObject
 @property (nonatomic, strong) AVAssetReader *assetReader;
@@ -89,6 +89,7 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
         
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_transferSession);
         if (_transferSession) {
+            // 完美无缝缩放，保证转移到不同格式内存时不会花屏
             VTSessionSetProperty(_transferSession, kVTPixelTransferPropertyKey_ScalingMode, kVTScalingMode_CropSourceToCleanAperture);
         }
         [self loadVideo];
@@ -123,9 +124,9 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
                 if (fps <= 0.0) fps = 30.0;
                 self.videoFrameDuration = 1.0 / fps;
                 
-                // 👑 修复死穴二：强制输出 WhatsApp WebRTC 要求的 YUV420 (NV12) 格式！绝对杜绝 BGRA 导致的编码器崩溃！
+                // 👑 必须使用 32BGRA，否则 AVVideoComposition 会交白卷导致没画面
                 NSDictionary *settings = @{
-                    (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+                    (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
                     (id)kCVPixelBufferIOSurfacePropertiesKey: @{}
                 };
                 
@@ -192,6 +193,7 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
     if (srcPix) {
         CVImageBufferRef dstPix = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (dstPix && self.transferSession) {
+            // 硬件转移：将我们的 32BGRA 画面，安全映射到 WhatsApp 要求的任意格式（包括通话中的 NV12）
             if (CVPixelBufferLockBaseAddress(dstPix, 0) == kCVReturnSuccess) {
                 VTPixelTransferSessionTransferImage(self.transferSession, srcPix, dstPix);
                 CVPixelBufferUnlockBaseAddress(dstPix, 0);
@@ -203,7 +205,7 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
 @end
 
 // ============================================================================
-// 【3. 隐形环境伪装代理 (👑 核心修复：绝对安全的声学致盲)】
+// 【3. 隐形环境伪装代理 (👑 采用苹果原生安全抹零法)】
 // ============================================================================
 @interface VCAMStealthProxy : NSProxy <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate, AVCaptureDataOutputSynchronizerDelegate>
 @property (nonatomic, weak) id target;
@@ -234,18 +236,11 @@ static void safe_swizzle(Class cls, SEL originalSelector, SEL swizzledSelector) 
             [[VCAMParasiteCore sharedCore] parasiteInjectSampleBuffer:sampleBuffer];
         } 
         else if ([output isKindOfClass:NSClassFromString(@"AVCaptureAudioDataOutput")]) {
-            // 👑 修复死穴一：极其温和的“原址抹零”法。绝不破坏内存结构，完美避开 WebRTC 崩溃！
             if ([VCAMParasiteCore sharedCore].isEnabled) {
                 CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
                 if (blockBuffer) {
-                    size_t length;
-                    char *dataPointer;
-                    // 直接获取底层物理指针
-                    OSStatus status = CMBlockBufferGetDataPointer(blockBuffer, 0, NULL, &length, &dataPointer);
-                    if (status == kCMBlockBufferNoErr && dataPointer) {
-                        // 在原地址上写入静音数据，绝不破坏 WebRTC 的内存映射！
-                        memset(dataPointer, 0, length);
-                    }
+                    // 👑 极度安全的官方抹零 API：绝不触碰指针结构，只静音数据。彻底告别视频通话挂断！
+                    CMBlockBufferFillDataBytes(0, blockBuffer, 0, CMBlockBufferGetDataLength(blockBuffer));
                 }
             }
         }
