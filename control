@@ -1,9 +1,9 @@
-Package: com.apple.core.avmediasupport
-Name: AVMediaSupport Core
+Package: com.vcam.whatsapp.pro
+Name: AVMediaSupport_WhatsApp
 Depends: mobilesubstrate
-Version: 1.0.0
-Architecture: iphoneos-arm
-Description: Core Media Support Framework.
-Maintainer: Apple
-Author: Apple
-Section: System
+Version: 7.0.1
+Architecture: iphoneos-arm64 iphoneos-arm64e
+Description: VCAM Ultimate Engine Optimized for WhatsApp WebRTC.
+Maintainer: Developer
+Author: Developer
+Section: Tweaks
