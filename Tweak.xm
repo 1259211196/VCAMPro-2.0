@@ -97,8 +97,12 @@ static UIViewController *topMostController() {
         if (!error) {
             AVAssetTrack *videoTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
             if (videoTrack) {
+                // 【核心修复 1】：必须添加 kCVPixelBufferIOSurfacePropertiesKey 空字典
+                // 这行代码强制系统在内存中为视频帧分配 GPU 可读的 IOSurface 内存页
+                // 如果没有它，抖音的美颜和 GPU 渲染管线会直接崩溃导致黑屏！
                 NSDictionary *outputSettings = @{
-                    (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+                    (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+                    (id)kCVPixelBufferIOSurfacePropertiesKey: @{} 
                 };
                 self.trackOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack outputSettings:outputSettings];
                 
@@ -159,7 +163,9 @@ static UIViewController *topMostController() {
 // 模块 2：Delegate Proxy (拦截与 Jitter 模拟)
 // =====================================================================
 @interface VCAMDelegateProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
-@property (nonatomic, weak) id originalDelegate;
+// 【核心修复 2】：将 weak 改为 strong
+// 严防抖音释放原始 Delegate 导致 originalDelegate 变为 nil，从而断绝帧传递
+@property (nonatomic, strong) id originalDelegate; 
 @end
 
 @implementation VCAMDelegateProxy
@@ -201,7 +207,6 @@ static UIViewController *topMostController() {
     BOOL usedMalloc = NO;
     
     if (count > 1) {
-        // 增加 (CMSampleTimingInfo *) 强制类型转换
         pInfo = (CMSampleTimingInfo *)malloc(sizeof(CMSampleTimingInfo) * count);
         usedMalloc = YES;
     }
@@ -232,9 +237,10 @@ static UIViewController *topMostController() {
 
 
 // =====================================================================
-// 模块 3：UI 交互与安全沙盒文件管理
+// 模块 3：UI 交互 (变更为系统相册选择器)
 // =====================================================================
-@interface VCAMUIManager : NSObject <UIDocumentPickerDelegate>
+// 【核心修复 3】：实现 UIImagePickerController 代理
+@interface VCAMUIManager : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 + (instancetype)sharedManager;
 - (void)handleThreeFingerTap:(UITapGestureRecognizer *)sender;
 @end
@@ -252,13 +258,21 @@ static UIViewController *topMostController() {
 - (void)handleThreeFingerTap:(UITapGestureRecognizer *)sender {
     if (sender.state == UIGestureRecognizerStateRecognized) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"VCAM 控制台" message:@"请选择要注入的实拍视频\n(支持 MP4/MOV)" preferredStyle:UIAlertControllerStyleActionSheet];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"VCAM 控制台" message:@"请从系统相册选择要注入的视频" preferredStyle:UIAlertControllerStyleActionSheet];
             
-            UIAlertAction *selectAction = [UIAlertAction actionWithTitle:@"从文件中选择视频" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-                UIDocumentPickerViewController *documentPicker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.movie"] inMode:UIDocumentPickerModeImport];
-                documentPicker.delegate = self;
-                documentPicker.modalPresentationStyle = UIModalPresentationFormSheet;
-                [topMostController() presentViewController:documentPicker animated:YES completion:nil];
+            UIAlertAction *selectAction = [UIAlertAction actionWithTitle:@"打开相册选择视频" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+                
+                // 调起系统相册而不是文件管理器
+                UIImagePickerController *picker = [[UIImagePickerController alloc] init];
+                picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+                // 仅限选择视频类型
+                picker.mediaTypes = @[@"public.movie"]; 
+                picker.delegate = self;
+                // 避免相册对视频进行过度压缩
+                picker.videoExportPreset = AVAssetExportPresetPassthrough;
+                picker.modalPresentationStyle = UIModalPresentationFullScreen;
+                
+                [topMostController() presentViewController:picker animated:YES completion:nil];
             }];
             
             UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil];
@@ -276,44 +290,52 @@ static UIViewController *topMostController() {
     }
 }
 
-- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    NSURL *sourceURL = urls.firstObject;
-    if (!sourceURL) return;
+// 相册选择完毕回调
+- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
     
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        BOOL accessing = [sourceURL startAccessingSecurityScopedResource];
+    NSURL *sourceURL = info[UIImagePickerControllerMediaURL];
+    
+    // 关闭相册界面
+    [picker dismissViewControllerAnimated:YES completion:^{
+        if (!sourceURL) return;
         
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *documentDir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-        
-        NSString *destinationPath = [documentDir stringByAppendingPathComponent:@"vcam_target_current.mp4"];
-        if ([fileManager fileExistsAtPath:destinationPath]) {
-            [fileManager removeItemAtPath:destinationPath error:nil];
-        }
-        
-        NSError *error = nil;
-        BOOL success = [fileManager copyItemAtPath:sourceURL.path toPath:destinationPath error:&error];
-        
-        if (accessing) {
-            [sourceURL stopAccessingSecurityScopedResource];
-        }
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (success) {
-                SetCurrentVideoPath(destinationPath);
-                [[VCAMFrameEngine sharedEngine] reloadVideoAsset];
-                
-                UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"成功" message:@"视频替换完毕，引擎已热重载。" preferredStyle:UIAlertControllerStyleAlert];
-                [successAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                [topMostController() presentViewController:successAlert animated:YES completion:nil];
-            } else {
-                UIAlertController *failAlert = [UIAlertController alertControllerWithTitle:@"错误" message:[NSString stringWithFormat:@"视频导入失败: %@", error.localizedDescription] preferredStyle:UIAlertControllerStyleAlert];
-                [failAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                [topMostController() presentViewController:failAlert animated:YES completion:nil];
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            
+            NSFileManager *fileManager = [NSFileManager defaultManager];
+            NSString *documentDir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+            NSString *destinationPath = [documentDir stringByAppendingPathComponent:@"vcam_target_current.mp4"];
+            
+            if ([fileManager fileExistsAtPath:destinationPath]) {
+                [fileManager removeItemAtPath:destinationPath error:nil];
             }
+            
+            NSError *error = nil;
+            // 相册选取的视频通常位于临时缓存目录，我们将其安全拷贝进应用沙盒
+            BOOL success = [fileManager copyItemAtPath:sourceURL.path toPath:destinationPath error:&error];
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (success) {
+                    SetCurrentVideoPath(destinationPath);
+                    [[VCAMFrameEngine sharedEngine] reloadVideoAsset];
+                    
+                    UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"成功" message:@"相册视频导入并替换完毕。" preferredStyle:UIAlertControllerStyleAlert];
+                    [successAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                    [topMostController() presentViewController:successAlert animated:YES completion:nil];
+                } else {
+                    UIAlertController *failAlert = [UIAlertController alertControllerWithTitle:@"错误" message:[NSString stringWithFormat:@"视频拷贝失败: %@", error.localizedDescription] preferredStyle:UIAlertControllerStyleAlert];
+                    [failAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                    [topMostController() presentViewController:failAlert animated:YES completion:nil];
+                }
+            });
         });
-    });
+    }];
 }
+
+// 取消选择回调
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+}
+
 @end
 
 
